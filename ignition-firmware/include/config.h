@@ -7,8 +7,8 @@
 // ==============================================================================
 
 #define FIRMWARE_VERSION            "1.0.0"
-#define DEFAULT_DEVICE_ID           "IGN-ESP32-001"
-#define DEFAULT_PAIRED_HELMET_ID    "HLM-ESP32-001"
+#define DEFAULT_DEVICE_ID           "IGN-2026-0001"
+#define DEFAULT_PAIRED_HELMET_ID    "HLM-2026-0001"
 
 // Default Pre-Shared Key (32-byte hex string) for HMAC-SHA256 pairing
 #define DEFAULT_PAIRING_PSK         "d4a8f9c1e2b3a4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"

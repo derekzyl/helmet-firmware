@@ -7,8 +7,8 @@
 // ==============================================================================
 
 #define FIRMWARE_VERSION            "1.0.0"
-#define DEFAULT_DEVICE_ID           "HLM-ESP32-001"
-#define DEFAULT_PAIRED_IGNITION_ID  "IGN-ESP32-001"
+#define DEFAULT_DEVICE_ID           "HLM-2026-0001"
+#define DEFAULT_PAIRED_IGNITION_ID  "IGN-2026-0001"
 
 // Default Pre-Shared Key (32-byte hex string) for HMAC-SHA256 local pairing
 #define DEFAULT_PAIRING_PSK         "d4a8f9c1e2b3a4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
@@ -21,10 +21,11 @@
 
 // Cloud Telemetry Timings
 #define CLOUD_TELEMETRY_INTERVAL_MS 3000    // 3 seconds cloud update interval
-#define CLOUD_BACKEND_HOST          "192.168.1.100"
-#define CLOUD_BACKEND_PORT          8000
-#define CLOUD_TELEMETRY_ENDPOINT    "/api/v1/telemetry"
-#define CLOUD_EVENTS_ENDPOINT       "/api/v1/events"
+#define CLOUD_BACKEND_HOST          "big-mariejeanne-cybergenii-b60e7032.koyeb.app"
+#define CLOUD_BACKEND_PORT          443
+#define CLOUD_USE_HTTPS             1
+#define CLOUD_TELEMETRY_ENDPOINT    "/api/v1/telemetry/ingest"
+#define CLOUD_EVENTS_ENDPOINT       "/api/v1/events/"
 
 // Safety Thresholds
 #define DEFAULT_BAC_THRESHOLD       0.05f   // 0.05% BAC limit
