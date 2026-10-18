@@ -1,0 +1,44 @@
+#pragma once
+
+#include <cstdint>
+
+// ==============================================================================
+// SMART HELMET FIRMWARE CONFIGURATION CONSTANTS
+// ==============================================================================
+
+#define FIRMWARE_VERSION            "1.0.0"
+#define DEFAULT_DEVICE_ID           "HLM-ESP32-001"
+#define DEFAULT_PAIRED_IGNITION_ID  "IGN-ESP32-001"
+
+// Default Pre-Shared Key (32-byte hex string) for HMAC-SHA256 local pairing
+#define DEFAULT_PAIRING_PSK         "d4a8f9c1e2b3a4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+
+// Local Link Timings
+#define LOCAL_HEARTBEAT_INTERVAL_MS 500     // 500 ms heartbeat
+#define LOCAL_LINK_TIMEOUT_MS       2000    // 2000 ms link loss threshold
+#define LOCAL_SERVER_PORT           8080
+#define LOCAL_SERVER_MDNS_HOST      "smarthelmet-ignition.local"
+
+// Cloud Telemetry Timings
+#define CLOUD_TELEMETRY_INTERVAL_MS 3000    // 3 seconds cloud update interval
+#define CLOUD_BACKEND_HOST          "192.168.1.100"
+#define CLOUD_BACKEND_PORT          8000
+#define CLOUD_TELEMETRY_ENDPOINT    "/api/v1/telemetry"
+#define CLOUD_EVENTS_ENDPOINT       "/api/v1/events"
+
+// Safety Thresholds
+#define DEFAULT_BAC_THRESHOLD       0.05f   // 0.05% BAC limit
+#define DEFAULT_IMPACT_THRESHOLD_G  4.0f    // 4.0 G peak impact
+#define DEFAULT_TILT_THRESHOLD_DEG  60.0f   // 60 degrees tilt
+#define CRITICAL_BATTERY_PCT        15      // 15% critical low battery warning
+
+// BLE Provisioning UUIDs
+#define BLE_SERVICE_UUID            "0000FE20-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_SSID_UUID          "0000FE21-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_PASS_UUID          "0000FE22-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_PSK_UUID           "0000FE23-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_PAIRID_UUID        "0000FE24-0000-1000-8000-00805F9B34FB"
+#define BLE_CHAR_STATUS_UUID        "0000FE25-0000-1000-8000-00805F9B34FB"
+
+// Hardware Watchdog Timeout (seconds)
+#define WDT_TIMEOUT_SECONDS         8
