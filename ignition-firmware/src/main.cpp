@@ -12,6 +12,7 @@
 #include "config.h"
 #include "crypto_utils.h"
 #include "safety_fsm.h"
+#include "ble_provision.h"
 
 // ==============================================================================
 // GLOBAL SYSTEM INSTANCES & STATE
@@ -24,24 +25,40 @@ LiquidCrystal_I2C lcd(0x27, LCD_COLUMNS, LCD_ROWS);
 SafetyFSM safety;
 HeartbeatInput latestHeartbeat;
 
-// Configuration & Credentials (loaded from NVS)
 String deviceId = DEFAULT_DEVICE_ID;
 String pairedHelmetId = DEFAULT_PAIRED_HELMET_ID;
 String pairingPsk = DEFAULT_PAIRING_PSK;
-String wifiSsid = "SmartHelmet_AP";
-String wifiPass = "helmet1234";
+String wifiSsid = DEFAULT_WIFI_SSID;
+String wifiPass = DEFAULT_WIFI_PASS;
+String softApSsid = "";
+bool autoConnect = true;
+bool provisioned = true;  // factory defaults enable out-of-box auto-connect
 
-// Operational Variables
 float v12BatteryVolts = 12.6f;
 uint8_t lcdCurrentPage = 0;
 bool lcdDetected = false;
 bool softApActive = false;
+bool helmetClientLinked = false;
 uint32_t lastSeqReceived = 0;
 uint32_t lastLcdUpdateMs = 0;
 uint32_t lastAnalogSenseMs = 0;
-uint32_t lastLedBlinkMs = 0;
+uint32_t lastLedMs = 0;
 uint32_t btn1PressStartMs = 0;
 uint32_t btn2PressStartMs = 0;
+uint32_t softApStartedMs = 0;
+uint32_t wifiConnectStartedMs = 0;
+bool btn2ProvArmed = false;
+
+enum class NetLedMode : uint8_t {
+    SAFETY,       // normal locked/unlocked LEDs
+    WIFI_TRY,     // red slow blink — STA connecting
+    SOFTAP_WAIT,  // green slow blink — waiting for helmet
+    BLE_PROV,     // green/red alternate — app pairing
+    LINK_FAIL     // red fast blink
+};
+
+NetLedMode netLedMode = NetLedMode::WIFI_TRY;
+bool ledPhase = false;
 
 // ==============================================================================
 // HARDWARE ACTUATION & I/O
@@ -49,19 +66,65 @@ uint32_t btn2PressStartMs = 0;
 
 void updateActuators() {
     bool ssrActive = safety.is_ssr_active();
-    // Safety Rule: GPIO 25 is HIGH only when safe
     digitalWrite(PIN_SSR_CONTROL, ssrActive ? HIGH : LOW);
 
-    // Status Indicator LEDs
-    if (safety.get_state() == IgnitionState::UNLOCKED || safety.get_state() == IgnitionState::RUNNING_LATCHED) {
-        digitalWrite(PIN_LED_GREEN, HIGH);
-        digitalWrite(PIN_LED_RED, LOW);
-    } else {
-        digitalWrite(PIN_LED_GREEN, LOW);
-        digitalWrite(PIN_LED_RED, HIGH);
+    uint32_t now = millis();
+    uint16_t period = LINK_LED_BLINK_SLOW_MS;
+
+    switch (netLedMode) {
+        case NetLedMode::BLE_PROV:
+            period = LINK_LED_BLINK_FAST_MS;
+            if (now - lastLedMs >= period) {
+                lastLedMs = now;
+                ledPhase = !ledPhase;
+                digitalWrite(PIN_LED_GREEN, ledPhase ? HIGH : LOW);
+                digitalWrite(PIN_LED_RED, ledPhase ? LOW : HIGH);
+            }
+            break;
+
+        case NetLedMode::WIFI_TRY:
+            period = LINK_LED_BLINK_SLOW_MS;
+            if (now - lastLedMs >= period) {
+                lastLedMs = now;
+                ledPhase = !ledPhase;
+                digitalWrite(PIN_LED_GREEN, LOW);
+                digitalWrite(PIN_LED_RED, ledPhase ? HIGH : LOW);
+            }
+            break;
+
+        case NetLedMode::SOFTAP_WAIT:
+            period = LINK_LED_BLINK_SLOW_MS;
+            if (now - lastLedMs >= period) {
+                lastLedMs = now;
+                ledPhase = !ledPhase;
+                digitalWrite(PIN_LED_GREEN, ledPhase ? HIGH : LOW);
+                digitalWrite(PIN_LED_RED, LOW);
+            }
+            break;
+
+        case NetLedMode::LINK_FAIL:
+            period = LINK_LED_BLINK_FAST_MS;
+            if (now - lastLedMs >= period) {
+                lastLedMs = now;
+                ledPhase = !ledPhase;
+                digitalWrite(PIN_LED_GREEN, LOW);
+                digitalWrite(PIN_LED_RED, ledPhase ? HIGH : LOW);
+            }
+            break;
+
+        case NetLedMode::SAFETY:
+        default:
+            if (safety.get_state() == IgnitionState::UNLOCKED ||
+                safety.get_state() == IgnitionState::RUNNING_LATCHED) {
+                digitalWrite(PIN_LED_GREEN, HIGH);
+                digitalWrite(PIN_LED_RED, LOW);
+            } else {
+                digitalWrite(PIN_LED_GREEN, LOW);
+                digitalWrite(PIN_LED_RED, HIGH);
+            }
+            break;
     }
 
-    // Buzzer warning during mid-ride alert or fault
     if (safety.is_mid_ride_warning()) {
         static uint32_t buzzTimer = 0;
         if (millis() - buzzTimer > 500) {
@@ -75,6 +138,29 @@ void updateActuators() {
     }
 }
 
+void refreshNetLedMode() {
+    if (ble_prov::active) {
+        netLedMode = NetLedMode::BLE_PROV;
+        return;
+    }
+    if (WiFi.status() != WL_CONNECTED && !softApActive) {
+        netLedMode = NetLedMode::WIFI_TRY;
+        return;
+    }
+    if (softApActive && !helmetClientLinked) {
+        netLedMode = NetLedMode::SOFTAP_WAIT;
+        return;
+    }
+    if (!helmetClientLinked &&
+        (safety.get_lock_reason() == LockReason::NO_LINK ||
+         safety.get_state() == IgnitionState::LOCKED)) {
+        // Linked WiFi but no helmet yet — keep safety red (locked)
+        netLedMode = NetLedMode::SAFETY;
+        return;
+    }
+    netLedMode = NetLedMode::SAFETY;
+}
+
 // ==============================================================================
 // 12V MOTORCYCLE BATTERY SENSE
 // ==============================================================================
@@ -83,18 +169,16 @@ void read12VBattery() {
     uint16_t rawAdc = analogRead(PIN_12V_SENSE);
     float vAdc = (rawAdc / 4095.0f) * 3.3f;
     float vActual = vAdc * ADC_12V_DIVIDER_RATIO;
-    // Bench fallback if disconnected
     if (vActual < 2.0f) vActual = 12.6f;
     v12BatteryVolts = vActual;
 }
 
 // ==============================================================================
-// 16x2 LCD DISPLAY PAGES (CYCLING VIA BUTTON 1)
+// 16x2 LCD DISPLAY (OPTIONAL — soft-fails if backpack missing)
 // ==============================================================================
 
 void initLcd() {
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000);
-    // Probe I2C address 0x27, then 0x3F
     Wire.beginTransmission(0x27);
     if (Wire.endTransmission() == 0) {
         lcd = LiquidCrystal_I2C(0x27, LCD_COLUMNS, LCD_ROWS);
@@ -116,7 +200,7 @@ void initLcd() {
         lcd.setCursor(0, 1);
         lcd.print("IGNITION v1.0.0");
     } else {
-        Serial.println("[LCD] I2C Backpack not detected on 0x27 or 0x3F");
+        Serial.println("[LCD] Not detected — app + LEDs are primary UI");
     }
 }
 
@@ -125,7 +209,7 @@ void renderLcdPage() {
 
     lcd.clear();
     switch (lcdCurrentPage) {
-        case 0: // Status & Lock Reason / SSR
+        case 0:
             lcd.setCursor(0, 0);
             lcd.printf("ST:%s", ignition_state_to_str(safety.get_state()));
             lcd.setCursor(0, 1);
@@ -136,9 +220,11 @@ void renderLcdPage() {
             }
             break;
 
-        case 1: // Link Status & Network IP
+        case 1:
             lcd.setCursor(0, 0);
-            if (softApActive) {
+            if (ble_prov::active) {
+                lcd.print("NET:BLE PAIRING");
+            } else if (softApActive) {
                 lcd.print("NET:SoftAP MODE");
             } else if (WiFi.status() == WL_CONNECTED) {
                 lcd.printf("SSID:%s", WiFi.SSID().substring(0, 10).c_str());
@@ -146,10 +232,14 @@ void renderLcdPage() {
                 lcd.print("NET:CONNECTING");
             }
             lcd.setCursor(0, 1);
-            lcd.printf("IP:%s", (softApActive ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str());
+            if (softApActive) {
+                lcd.printf("%s", softApSsid.substring(0, 16).c_str());
+            } else {
+                lcd.printf("IP:%s", WiFi.localIP().toString().c_str());
+            }
             break;
 
-        case 2: // Helmet Battery & Alcohol BAC
+        case 2:
             lcd.setCursor(0, 0);
             lcd.printf("HLM BATT: %d%%", latestHeartbeat.batt_pct);
             lcd.setCursor(0, 1);
@@ -157,7 +247,7 @@ void renderLcdPage() {
                        (latestHeartbeat.bac > 0.05f) ? "FAIL" : "PASS");
             break;
 
-        case 3: // 12V Motorcycle Battery
+        case 3:
             lcd.setCursor(0, 0);
             lcd.print("BIKE 12V BATTERY");
             lcd.setCursor(0, 1);
@@ -165,11 +255,11 @@ void renderLcdPage() {
                        (v12BatteryVolts < V12_CRITICAL_LOW_VOLTS) ? "LOW" : "OK");
             break;
 
-        case 4: // Uptime & Frame Counter
+        case 4:
             lcd.setCursor(0, 0);
             lcd.printf("UP: %lus", millis() / 1000);
             lcd.setCursor(0, 1);
-            lcd.printf("NONCE: #%lu", lastSeqReceived);
+            lcd.printf("LINK:%s #%lu", helmetClientLinked ? "OK" : "--", lastSeqReceived);
             break;
     }
 }
@@ -182,10 +272,13 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
     switch (type) {
         case WStype_DISCONNECTED:
             Serial.printf("[WS-SRV] Client #%u Disconnected\n", num);
+            if (wsServer.connectedClients() == 0) {
+                helmetClientLinked = false;
+            }
             break;
 
         case WStype_CONNECTED:
-            Serial.printf("[WS-SRV] Client #%u Connected from IP\n", num);
+            Serial.printf("[WS-SRV] Client #%u Connected\n", num);
             break;
 
         case WStype_TEXT: {
@@ -202,21 +295,18 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
             uint32_t ts = doc["ts"] | 0;
             const char* sig = doc["sig"] | "";
 
-            // 1. Authenticate Paired Device ID
             if (String(senderDev) != pairedHelmetId) {
                 Serial.printf("[WS-SRV] REJECTED: Unpaired device %s (expected %s)\n",
                               senderDev, pairedHelmetId.c_str());
                 return;
             }
 
-            // 2. Anti-Replay: Verify Monotonic Sequence Nonce
             if (seq <= lastSeqReceived && lastSeqReceived > 0) {
-                Serial.printf("[WS-SRV] REJECTED: Replay attack detected! seq=%lu <= last=%lu\n",
+                Serial.printf("[WS-SRV] REJECTED: Replay seq=%lu <= last=%lu\n",
                               seq, lastSeqReceived);
                 return;
             }
 
-            // 3. Verify HMAC-SHA256 Signature
             JsonObject data = doc["data"];
             String dataString;
             serializeJson(data, dataString);
@@ -233,8 +323,8 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
                 return;
             }
 
-            // Signature & Nonce Validated!
             lastSeqReceived = seq;
+            helmetClientLinked = true;
             safety.register_heartbeat(millis());
 
             if (strcmp(msgType, "HEARTBEAT") == 0) {
@@ -246,7 +336,6 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
                 latestHeartbeat.batt_pct = data["batt_pct"] | 100;
                 latestHeartbeat.speed_kmh = data["speed"] | 0.0f;
 
-                // Send HEARTBEAT_ACK
                 StaticJsonDocument<384> ackDoc;
                 ackDoc["ver"] = 1;
                 ackDoc["type"] = "HEARTBEAT_ACK";
@@ -279,7 +368,7 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
             } else if (strcmp(msgType, "MAINTENANCE_OVERRIDE") == 0) {
                 uint32_t duration = data["duration_sec"] | 300;
                 safety.apply_maintenance_override(millis(), duration);
-                Serial.printf("[WS-SRV] Maintenance Override Activated for %lu seconds\n", duration);
+                Serial.printf("[WS-SRV] Maintenance Override for %lu s\n", duration);
             }
             break;
         }
@@ -290,13 +379,31 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
 }
 
 // ==============================================================================
+// BLE PROVISIONING ENTRY
+// ==============================================================================
+
+void enterBleProvisioning(bool keepSoftAp = false) {
+    if (ble_prov::active) return;
+    Serial.println("[BLE] Entering app provisioning mode (SH-IGN-PROV)");
+    if (!keepSoftAp) {
+        wsServer.close();
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        delay(200);
+        softApActive = false;
+        helmetClientLinked = false;
+    }
+    ble_prov::start(BLE_ADV_NAME);
+    netLedMode = NetLedMode::BLE_PROV;
+}
+
+// ==============================================================================
 // BUTTON INPUT HANDLING
 // ==============================================================================
 
 void handleButtons() {
     uint32_t now = millis();
 
-    // Button 1: Cycle LCD Display Pages
     if (digitalRead(PIN_BUTTON_1) == LOW) {
         if (btn1PressStartMs == 0) btn1PressStartMs = now;
     } else {
@@ -305,32 +412,36 @@ void handleButtons() {
             if (duration >= 50 && duration < 2000) {
                 lcdCurrentPage = (lcdCurrentPage + 1) % TOTAL_LCD_PAGES;
                 renderLcdPage();
-                Serial.printf("[BUTTON-1] Cycled to LCD Page %d\n", lcdCurrentPage);
+                Serial.printf("[BUTTON-1] LCD Page %d\n", lcdCurrentPage);
             }
             btn1PressStartMs = 0;
         }
     }
 
-    // Button 2: Hold 5s for Provisioning / Hold 15s for Factory Reset
     if (digitalRead(PIN_BUTTON_2) == LOW) {
-        if (btn2PressStartMs == 0) btn2PressStartMs = now;
-        else if (now - btn2PressStartMs >= 15000) {
+        if (btn2PressStartMs == 0) {
+            btn2PressStartMs = now;
+            btn2ProvArmed = false;
+        } else if (now - btn2PressStartMs >= 15000) {
             Serial.println("[BUTTON-2] 15s Hold: FACTORY RESET!");
             prefs.begin("ignition_cfg", false);
             prefs.clear();
             prefs.end();
             btn2PressStartMs = 0;
             ESP.restart();
-        } else if (now - btn2PressStartMs >= 5000 && now - btn2PressStartMs < 5200) {
-            Serial.println("[BUTTON-2] 5s Hold: BLE Provisioning Mode Triggered");
+        } else if (!btn2ProvArmed && now - btn2PressStartMs >= 5000) {
+            btn2ProvArmed = true;
+            Serial.println("[BUTTON-2] 5s Hold: BLE Provisioning");
+            enterBleProvisioning();
         }
     } else {
         btn2PressStartMs = 0;
+        btn2ProvArmed = false;
     }
 }
 
 // ==============================================================================
-// SERIAL COMMAND CLI (FOR BENCH TESTING & SIMULATION)
+// SERIAL COMMAND CLI
 // ==============================================================================
 
 void handleSerialCommands() {
@@ -339,71 +450,117 @@ void handleSerialCommands() {
     cmd.trim();
 
     if (cmd == "UNLOCK") {
-        Serial.println("[CMD] Manually Simulating Safe Rider Unlock");
+        Serial.println("[CMD] Simulating Safe Rider Unlock");
         latestHeartbeat.worn = true;
         latestHeartbeat.worn_ms = 2000;
         latestHeartbeat.mq3_warm = true;
         latestHeartbeat.bac = 0.00f;
         latestHeartbeat.batt_pct = 95;
+        helmetClientLinked = true;
         safety.register_heartbeat(millis());
     } else if (cmd == "ALCOHOL") {
-        Serial.println("[CMD] Injecting Alcohol Violation (0.09% BAC)");
         latestHeartbeat.bac = 0.09f;
         safety.register_heartbeat(millis());
     } else if (cmd == "CRASH") {
-        Serial.println("[CMD] Injecting Collision Cutoff Event");
         latestHeartbeat.impact = true;
         safety.register_heartbeat(millis());
     } else if (cmd == "CLEAR") {
         safety.clear_fault();
-        Serial.println("[CMD] Fault Cleared");
+    } else if (cmd == "PROV" || cmd == "BLE") {
+        enterBleProvisioning();
     } else if (cmd == "PAGE") {
         lcdCurrentPage = (lcdCurrentPage + 1) % TOTAL_LCD_PAGES;
         renderLcdPage();
     } else if (cmd == "STATUS") {
-        Serial.printf("[STATUS] State: %s | SSR: %d | Rsn: %s | 12V: %.2fV | LCD: %d\n",
+        Serial.printf("[STATUS] State:%s SSR:%d Rsn:%s 12V:%.2f SoftAP:%s BLE:%d Link:%d\n",
                       ignition_state_to_str(safety.get_state()), safety.is_ssr_active(),
-                      lock_reason_to_str(safety.get_lock_reason()), v12BatteryVolts, lcdCurrentPage);
+                      lock_reason_to_str(safety.get_lock_reason()), v12BatteryVolts,
+                      softApSsid.c_str(), ble_prov::active, helmetClientLinked);
     }
 }
 
 // ==============================================================================
-// CONNECTION MANAGER (STA WITH SOFTAP FALLBACK)
+// CONNECTION MANAGER (STA → SoftAP fallback → optional BLE)
 // ==============================================================================
 
+void startSoftAp() {
+    WiFi.mode(WIFI_AP);
+    String mac = WiFi.macAddress();
+    mac.replace(":", "");
+    softApSsid = String(DEFAULT_SOFTAP_PREFIX) + mac.substring(mac.length() - 4);
+    WiFi.softAP(softApSsid.c_str(), DEFAULT_SOFTAP_PASS);
+    softApActive = true;
+    softApStartedMs = millis();
+    Serial.printf("[WIFI] SoftAP Active: %s | IP: %s | pass: %s\n",
+                  softApSsid.c_str(), WiFi.softAPIP().toString().c_str(), DEFAULT_SOFTAP_PASS);
+
+    prefs.begin("ignition_cfg", false);
+    prefs.putString("softap_ssid", softApSsid);
+    prefs.end();
+}
+
 void setupNetworking() {
+    if (!autoConnect) {
+        Serial.println("[WIFI] Auto-connect disabled — starting SoftAP + BLE");
+        startSoftAp();
+        enterBleProvisioning(true);
+        if (MDNS.begin("smarthelmet-ignition")) {
+            MDNS.addService("http", "tcp", LOCAL_SERVER_PORT);
+        }
+        wsServer.begin();
+        wsServer.onEvent(onWebSocketServerEvent);
+        return;
+    }
+
+    netLedMode = NetLedMode::WIFI_TRY;
     WiFi.mode(WIFI_STA);
-    Serial.printf("[WIFI] Connecting to Infrastructure SSID: %s...\n", wifiSsid.c_str());
+    Serial.printf("[WIFI] Auto-connecting to SSID: %s...\n", wifiSsid.c_str());
+    wifiConnectStartedMs = millis();
     WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
     uint32_t startMs = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startMs < SOFTAP_TIMEOUT_MS) {
-        delay(250);
+        delay(200);
+        updateActuators();
         Serial.print(".");
+        esp_task_wdt_reset();
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WIFI] Connected as STA! IP: %s\n", WiFi.localIP().toString().c_str());
+        Serial.printf("\n[WIFI] STA Connected! IP: %s\n", WiFi.localIP().toString().c_str());
         softApActive = false;
+        softApSsid = "";
     } else {
-        Serial.println("\n[WIFI] STA timeout. Starting fallback SoftAP mode...");
-        WiFi.mode(WIFI_AP);
-        String mac = WiFi.macAddress();
-        mac.replace(":", "");
-        String apName = "SH-IGN-" + mac.substring(mac.length() - 4);
-        WiFi.softAP(apName.c_str(), DEFAULT_SOFTAP_PASS);
-        softApActive = true;
-        Serial.printf("[WIFI] SoftAP Active: %s | IP: %s\n", apName.c_str(), WiFi.softAPIP().toString().c_str());
+        Serial.println("\n[WIFI] STA timeout — SoftAP fallback");
+        startSoftAp();
     }
 
     if (MDNS.begin("smarthelmet-ignition")) {
-        Serial.println("[mDNS] Responder started: smarthelmet-ignition.local");
+        Serial.println("[mDNS] smarthelmet-ignition.local");
         MDNS.addService("http", "tcp", LOCAL_SERVER_PORT);
     }
 
     wsServer.begin();
     wsServer.onEvent(onWebSocketServerEvent);
-    Serial.printf("[WS-SRV] Local WebSocket Server listening on port %d\n", LOCAL_SERVER_PORT);
+    Serial.printf("[WS-SRV] Listening on port %d\n", LOCAL_SERVER_PORT);
+}
+
+void maintainProvisioning() {
+    if (!ble_prov::active) {
+        // After SoftAP is up with no helmet, open BLE so app can pair without LCD/button
+        if (softApActive && !helmetClientLinked &&
+            softApStartedMs > 0 &&
+            (millis() - softApStartedMs) >= AUTO_BLE_AFTER_NO_CLIENT_MS) {
+            Serial.println("[BLE] No helmet link — auto-opening BLE (SoftAP stays up)");
+            enterBleProvisioning(true);
+            softApStartedMs = 0;  // only auto-open once per SoftAP session
+        }
+        return;
+    }
+
+    if (ble_prov::applyToNvs(prefs, "ignition_cfg", wifiSsid, wifiPass, pairingPsk, pairedHelmetId)) {
+        ESP.restart();
+    }
 }
 
 // ==============================================================================
@@ -411,7 +568,6 @@ void setupNetworking() {
 // ==============================================================================
 
 void setup() {
-    // CRITICAL: Initialize SSR pin LOW immediately before anything else
     pinMode(PIN_SSR_CONTROL, OUTPUT);
     digitalWrite(PIN_SSR_CONTROL, LOW);
 
@@ -423,51 +579,56 @@ void setup() {
     pinMode(PIN_BUTTON_2, INPUT_PULLUP);
 
     digitalWrite(PIN_LED_GREEN, LOW);
-    digitalWrite(PIN_LED_RED, HIGH); // Default LOCKED indicator
+    digitalWrite(PIN_LED_RED, HIGH);
 
     Serial.begin(115200);
     delay(300);
     Serial.println("\n==============================================");
-    Serial.println(" SMART IGNITION CONTROLLER — FIRMWARE v1.0.0 ");
+    Serial.println(" SMART IGNITION CONTROLLER — FIRMWARE v1.1.0 ");
+    Serial.println(" LCD optional | App BLE pairing + LED status  ");
     Serial.println("==============================================");
 
-    // Load NVS Preferences
     prefs.begin("ignition_cfg", false);
     deviceId = prefs.getString("dev_id", DEFAULT_DEVICE_ID);
     pairedHelmetId = prefs.getString("pair_id", DEFAULT_PAIRED_HELMET_ID);
     pairingPsk = prefs.getString("psk", DEFAULT_PAIRING_PSK);
-    wifiSsid = prefs.getString("ssid", "SmartHelmet_AP");
-    wifiPass = prefs.getString("pass", "helmet1234");
+    wifiSsid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
+    wifiPass = prefs.getString("pass", DEFAULT_WIFI_PASS);
+    softApSsid = prefs.getString("softap_ssid", "");
+    autoConnect = prefs.getBool("auto_connect", true);
+    provisioned = prefs.getBool("provisioned", true);
     prefs.end();
 
     initLcd();
     read12VBattery();
     setupNetworking();
 
-    // Hardware Watchdog (8 seconds)
     esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
     esp_task_wdt_add(NULL);
 
-    Serial.println("[SYSTEM] Ignition controller supervisor running.");
+    Serial.printf("[SYSTEM] Device=%s PairedHelmet=%s AutoConnect=%d\n",
+                  deviceId.c_str(), pairedHelmetId.c_str(), autoConnect);
 }
 
 void loop() {
     esp_task_wdt_reset();
-    wsServer.loop();
+    if (!ble_prov::active) {
+        wsServer.loop();
+    }
 
     uint32_t now = millis();
 
-    // Periodic Analog 12V Sense (every 100ms)
     if (now - lastAnalogSenseMs >= 100) {
         lastAnalogSenseMs = now;
         read12VBattery();
         safety.update(latestHeartbeat, now, v12BatteryVolts);
+        refreshNetLedMode();
         updateActuators();
         handleButtons();
         handleSerialCommands();
+        maintainProvisioning();
     }
 
-    // Refresh LCD Display (every 500ms)
     if (now - lastLcdUpdateMs >= 500) {
         lastLcdUpdateMs = now;
         renderLcdPage();
