@@ -2,6 +2,19 @@
 
 Firmware for the ESP32 (38-pin DevKit) embedded in the Smart Helmet. Built on PlatformIO with the Arduino framework, FreeRTOS non-blocking task architecture, and hardware watchdog protection.
 
+Pairing / Wi‑Fi setup is driven from the HelmGuard app over BLE (`SH-HLM-PROV`). Default auto-connect tries saved STA, then scans for ignition SoftAP `SH-IGN-*`.
+
+### LED link indicators (existing wiring)
+| Pattern | Meaning |
+| :--- | :--- |
+| Yellow slow blink | Wi‑Fi connect attempt |
+| Yellow/Red alternate | Scanning for `SH-IGN-*` SoftAP |
+| Yellow fast blink | BLE provisioning mode |
+| Yellow + green pulse | Wi‑Fi up, waiting for ignition WebSocket |
+| Solid green / yellow / red | Safety UI (unlocked / warning / locked) |
+
+Hold **Button B for 5s** (or wait ~25s with no link) for BLE. Serial `PROV` also works.
+
 ---
 
 ## Hardware Pinout (`include/pins.h`)

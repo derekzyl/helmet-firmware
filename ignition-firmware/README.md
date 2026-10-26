@@ -1,6 +1,16 @@
 # Smart Ignition Unit Firmware (`ignition-firmware`)
 
-Safety-critical motorcycle ignition controller firmware for the ESP32 DevKit. Built on PlatformIO with the Arduino framework, FreeRTOS non-blocking supervisor, fail-safe solid-state relay (SSR) default-LOW architecture, and LCD diagnostic interface.
+Safety-critical motorcycle ignition controller firmware for the ESP32 DevKit. Built on PlatformIO with the Arduino framework, FreeRTOS non-blocking supervisor, fail-safe solid-state relay (SSR) default-LOW architecture. **LCD is optional** — primary setup is the HelmGuard app over BLE (`SH-IGN-PROV`); LEDs show Wi‑Fi / SoftAP / BLE pairing status.
+
+### LED link indicators (existing wiring)
+| Pattern | Meaning |
+| :--- | :--- |
+| Red slow blink | Connecting to Wi‑Fi STA |
+| Green slow blink | SoftAP up, waiting for helmet |
+| Green/Red alternate (fast) | BLE provisioning (`SH-IGN-PROV`) |
+| Solid green / red | Safety FSM unlocked / locked |
+
+Hold **Button 2 for 5s** (or wait ~20s with no helmet link) to advertise BLE for app pairing. Serial `PROV` also works.
 
 ---
 
