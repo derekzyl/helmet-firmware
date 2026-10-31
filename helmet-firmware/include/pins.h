@@ -33,7 +33,7 @@
 // --- Sensors & Digital Inputs ---
 #define PIN_HELMET_IR         18    // FC-51 Infrared Proximity Sensor (Active-LOW when worn)
 #define PIN_BUTTON_A          4     // Tactile Button A: SOS Cancel / False Alarm / OK (INPUT_PULLUP)
-#define PIN_BUTTON_B          13    // Tactile Button B: Status / Hold 5s for BLE Prov (INPUT_PULLUP)
+#define PIN_BUTTON_B          13    // Tactile Button B: Hold 3s for BLE Prov SH-HLM-PROV (INPUT_PULLUP)
 
 // --- Actuators & Outputs ---
 #define PIN_BUZZER            27    // Active 5V Piezo Buzzer (driven via 2N2222 transistor)

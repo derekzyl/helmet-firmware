@@ -628,7 +628,7 @@ void handleButtons() {
         if (btnBPressStartMs == 0) {
             btnBPressStartMs = now;
             btnBProvArmed = false;
-        } else if (!btnBProvArmed && now - btnBPressStartMs >= 5000) {
+        } else if (!btnBProvArmed && now - btnBPressStartMs >= 3000) {
             btnBProvArmed = true;
             enterBleProvisioning();
         }
@@ -872,6 +872,7 @@ void setup() {
     wifiPass = prefs.getString("pass", DEFAULT_SOFTAP_PASS);
     autoConnect = prefs.getBool("auto_connect", true);
     preferSoftAp = prefs.getBool("prefer_softap", true);
+    bool wasProvisioned = prefs.getBool("provisioned", false);
     if (wifiSsid == SOFTAP_ONLY_SSID || wifiSsid.length() == 0) preferSoftAp = true;
     prefs.end();
 
@@ -888,7 +889,13 @@ void setup() {
     initSim800L();
     alcohol.start_warmup(millis());
 
-    connectWiFi();
+    // Fresh boards: advertise BLE immediately so the phone can pair without waiting
+    if (!wasProvisioned || !autoConnect) {
+        Serial.println("[BLE] Not provisioned / auto-connect off — advertising SH-HLM-PROV");
+        enterBleProvisioning();
+    } else {
+        connectWiFi();
+    }
 
     esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
     esp_task_wdt_add(NULL);

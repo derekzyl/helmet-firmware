@@ -7,8 +7,8 @@
 // ==============================================================================
 
 #define FIRMWARE_VERSION            "1.0.0"
-#define DEFAULT_DEVICE_ID           "HLM-2026-0001"
-#define DEFAULT_PAIRED_IGNITION_ID  "IGN-2026-0001"
+#define DEFAULT_DEVICE_ID           "HLM-2026"
+#define DEFAULT_PAIRED_IGNITION_ID  "IGN-2026"
 
 // Default Pre-Shared Key (32-byte hex string) for HMAC-SHA256 local pairing
 #define DEFAULT_PAIRING_PSK         "d4a8f9c1e2b3a4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
@@ -25,7 +25,7 @@
 #define SOFTAP_ONLY_SSID            "__SOFTAP__"   // NVS sentinel: skip STA, peer SoftAP only
 #define WIFI_STA_TIMEOUT_MS         12000
 #define WIFI_RECONNECT_INTERVAL_MS  8000
-#define AUTO_BLE_AFTER_NO_LINK_MS   25000
+#define AUTO_BLE_AFTER_NO_LINK_MS   12000   // open BLE if SoftAP peer never links
 #define INTERNET_PROBE_INTERVAL_MS  20000
 
 // Cloud Telemetry Timings
