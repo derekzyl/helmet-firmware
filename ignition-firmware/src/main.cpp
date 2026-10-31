@@ -1,12 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include <esp_task_wdt.h>
+#include <cstring>
 
 #include "pins.h"
 #include "config.h"
@@ -20,6 +23,7 @@
 
 Preferences prefs;
 WebSocketsServer wsServer(LOCAL_SERVER_PORT);
+WebServer httpServer(80);  // phone/app SoftAP status (live sensors)
 LiquidCrystal_I2C lcd(0x27, LCD_COLUMNS, LCD_ROWS);
 
 SafetyFSM safety;
@@ -48,6 +52,8 @@ uint32_t btn1PressStartMs = 0;
 uint32_t btn2PressStartMs = 0;
 uint32_t softApStartedMs = 0;
 uint32_t wifiConnectStartedMs = 0;
+uint32_t lastCloudForwardMs = 0;
+uint32_t lastHelmetHbMs = 0;
 bool btn2ProvArmed = false;
 
 enum class NetLedMode : uint8_t {
@@ -336,6 +342,20 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
                 latestHeartbeat.impact = data["impact"] | false;
                 latestHeartbeat.batt_pct = data["batt_pct"] | 100;
                 latestHeartbeat.speed_kmh = data["speed"] | 0.0f;
+                latestHeartbeat.ir_near = data["ir_near"] | latestHeartbeat.worn;
+                latestHeartbeat.ir_raw = data["ir_raw"] | 1;
+                latestHeartbeat.mq3_raw = data["mq3_raw"] | 0;
+                latestHeartbeat.tilt_deg = data["tilt_deg"] | 0.0f;
+                latestHeartbeat.impact_g = data["impact_g"] | 1.0f;
+                latestHeartbeat.ax = data["ax"] | 0.0f;
+                latestHeartbeat.ay = data["ay"] | 0.0f;
+                latestHeartbeat.az = data["az"] | 1.0f;
+                {
+                    const char* imu = data["imu_state"] | "IDLE";
+                    strncpy(latestHeartbeat.imu_state, imu, sizeof(latestHeartbeat.imu_state) - 1);
+                    latestHeartbeat.imu_state[sizeof(latestHeartbeat.imu_state) - 1] = '\0';
+                }
+                lastHelmetHbMs = millis();
 
                 StaticJsonDocument<384> ackDoc;
                 ackDoc["ver"] = 1;
@@ -484,6 +504,98 @@ void handleSerialCommands() {
 // CONNECTION MANAGER (STA → SoftAP fallback → optional BLE)
 // ==============================================================================
 
+void handleHttpStatus() {
+    StaticJsonDocument<768> doc;
+    doc["device_id"] = pairedHelmetId;
+    doc["ignition_id"] = deviceId;
+    doc["helmet_worn"] = latestHeartbeat.worn;
+    doc["ir_near"] = latestHeartbeat.ir_near;
+    doc["ir_raw"] = latestHeartbeat.ir_raw;
+    doc["bac_level"] = latestHeartbeat.bac;
+    doc["alcohol_detected"] = latestHeartbeat.bac > 0.05f;
+    doc["mq3_raw"] = latestHeartbeat.mq3_raw;
+    doc["mq3_warm"] = latestHeartbeat.mq3_warm;
+    doc["mq3_warmed_up"] = latestHeartbeat.mq3_warm;
+    doc["battery_percentage"] = latestHeartbeat.batt_pct;
+    doc["battery_pct"] = latestHeartbeat.batt_pct;
+    doc["impact_g"] = latestHeartbeat.impact_g;
+    doc["tilt_degrees"] = latestHeartbeat.tilt_deg;
+    doc["tilt_deg"] = latestHeartbeat.tilt_deg;
+    doc["ax"] = latestHeartbeat.ax;
+    doc["ay"] = latestHeartbeat.ay;
+    doc["az"] = latestHeartbeat.az;
+    doc["imu_state"] = latestHeartbeat.imu_state;
+    doc["imu_anomaly"] = latestHeartbeat.impact;
+    doc["speed_kmh"] = latestHeartbeat.speed_kmh;
+    doc["latitude"] = 0;
+    doc["longitude"] = 0;
+    doc["ignition_status"] = ignition_state_to_str(safety.get_state());
+    doc["ignition_state"] = ignition_state_to_str(safety.get_state());
+    doc["lock_reason"] = lock_reason_to_str(safety.get_lock_reason());
+    doc["local_link_connected"] = helmetClientLinked;
+    doc["wifi_mode"] = softApActive ? "SOFTAP" : "STA";
+    doc["wifi_ssid"] = softApActive ? softApSsid : wifiSsid;
+    doc["internet_ok"] = (WiFi.status() == WL_CONNECTED);
+    doc["shared_wifi"] = (WiFi.status() == WL_CONNECTED);
+    doc["prefer_softap"] = preferSoftAp;
+    doc["live_local"] = true;
+    doc["hb_age_ms"] = lastHelmetHbMs == 0 ? -1 : (int)(millis() - lastHelmetHbMs);
+    doc["timestamp"] = (uint32_t)(millis() / 1000);
+
+    String out;
+    serializeJson(doc, out);
+    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+    httpServer.send(200, "application/json", out);
+}
+
+void startHttpStatusServer() {
+    httpServer.on("/status", HTTP_GET, handleHttpStatus);
+    httpServer.on("/", HTTP_GET, handleHttpStatus);
+    httpServer.begin();
+    Serial.println("[HTTP] SoftAP status on :80/status (live helmet sensors)");
+}
+
+void forwardHelmetTelemetryToCloud() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (lastHelmetHbMs == 0) return;
+    if (millis() - lastCloudForwardMs < CLOUD_FORWARD_INTERVAL_MS) return;
+    lastCloudForwardMs = millis();
+
+    HTTPClient http;
+    String url = String("https://") + CLOUD_BACKEND_HOST + CLOUD_TELEMETRY_ENDPOINT;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<768> doc;
+    doc["device_id"] = pairedHelmetId;
+    doc["helmet_worn"] = latestHeartbeat.worn;
+    doc["bac_level"] = latestHeartbeat.bac;
+    doc["alcohol_detected"] = latestHeartbeat.bac > 0.05f;
+    doc["mq3_raw"] = latestHeartbeat.mq3_raw;
+    doc["battery_percentage"] = latestHeartbeat.batt_pct;
+    doc["impact_g"] = latestHeartbeat.impact_g;
+    doc["tilt_degrees"] = latestHeartbeat.tilt_deg;
+    doc["ax"] = latestHeartbeat.ax;
+    doc["ay"] = latestHeartbeat.ay;
+    doc["az"] = latestHeartbeat.az;
+    doc["imu_state"] = latestHeartbeat.imu_state;
+    doc["speed_kmh"] = latestHeartbeat.speed_kmh;
+    doc["ignition_status"] = ignition_state_to_str(safety.get_state());
+    doc["lock_reason"] = lock_reason_to_str(safety.get_lock_reason());
+    doc["local_link_connected"] = helmetClientLinked;
+    doc["wifi_mode"] = "STA";
+    doc["internet_ok"] = true;
+    doc["shared_wifi"] = true;
+
+    String body;
+    serializeJson(doc, body);
+    int code = http.POST(body);
+    http.end();
+    if (code > 0) {
+        Serial.printf("[CLOUD] Forwarded helmet telemetry HTTP %d\n", code);
+    }
+}
+
 void startSoftAp() {
     WiFi.mode(WIFI_AP);
     String mac = WiFi.macAddress();
@@ -516,6 +628,7 @@ void setupNetworking() {
         }
         wsServer.begin();
         wsServer.onEvent(onWebSocketServerEvent);
+        startHttpStatusServer();
         Serial.printf("[WS-SRV] Listening on SoftAP port %d\n", LOCAL_SERVER_PORT);
         return;
     }
@@ -550,6 +663,7 @@ void setupNetworking() {
 
     wsServer.begin();
     wsServer.onEvent(onWebSocketServerEvent);
+    startHttpStatusServer();
     Serial.printf("[WS-SRV] Listening on port %d\n", LOCAL_SERVER_PORT);
 }
 
@@ -625,6 +739,7 @@ void loop() {
     if (!ble_prov::active) {
         wsServer.loop();
     }
+    httpServer.handleClient();
 
     uint32_t now = millis();
 
@@ -637,6 +752,7 @@ void loop() {
         handleButtons();
         handleSerialCommands();
         maintainProvisioning();
+        forwardHelmetTelemetryToCloud();
     }
 
     if (now - lastLcdUpdateMs >= 500) {

@@ -59,6 +59,16 @@ struct HeartbeatInput {
     bool impact = false;
     uint8_t batt_pct = 100;
     float speed_kmh = 0.0f;
+    // Diagnostic mirror (does not gate FSM by itself)
+    bool ir_near = false;
+    int ir_raw = 1;
+    uint16_t mq3_raw = 0;
+    float tilt_deg = 0.0f;
+    float impact_g = 1.0f;
+    float ax = 0.0f;
+    float ay = 0.0f;
+    float az = 1.0f;
+    char imu_state[16] = "IDLE";
 };
 
 struct SafetyConfig {

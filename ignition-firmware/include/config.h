@@ -7,8 +7,11 @@
 // ==============================================================================
 
 #define FIRMWARE_VERSION            "1.0.0"
-#define DEFAULT_DEVICE_ID           "IGN-2026-0001"
-#define DEFAULT_PAIRED_HELMET_ID    "HLM-2026-0001"
+#define DEFAULT_DEVICE_ID           "IGN-2026"
+#define DEFAULT_PAIRED_HELMET_ID    "HLM-2026"
+#define CLOUD_BACKEND_HOST          "big-mariejeanne-cybergenii-b60e7032.koyeb.app"
+#define CLOUD_TELEMETRY_ENDPOINT    "/api/v1/telemetry/ingest"
+#define CLOUD_FORWARD_INTERVAL_MS   3000
 
 // Default Pre-Shared Key (32-byte hex string) for HMAC-SHA256 pairing
 #define DEFAULT_PAIRING_PSK         "d4a8f9c1e2b3a4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"

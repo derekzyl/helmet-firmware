@@ -321,13 +321,20 @@ void sendLocalHeartbeat() {
     JsonObject data = doc.createNestedObject("data");
     data["worn"] = currentFrame.helmet_worn;
     data["worn_ms"] = currentFrame.worn_duration_ms;
+    data["ir_near"] = (currentFrame.worn_duration_ms > 0);
+    data["ir_raw"] = digitalRead(PIN_HELMET_IR);
     data["bac"] = serialized(String(currentFrame.bac_level, 3));
     data["mq3_raw"] = currentFrame.mq3_raw;
     data["mq3_warm"] = currentFrame.mq3_warmed_up;
     data["impact"] = currentFrame.impact_flag;
+    data["impact_g"] = serialized(String(currentFrame.impact_g, 2));
     data["tilt_deg"] = serialized(String(currentFrame.tilt_deg, 1));
     data["tilt_warn"] = currentFrame.tilt_warning;
     data["imu_anomaly"] = currentFrame.imu_anomaly;
+    data["imu_state"] = currentFrame.imu_state;
+    data["ax"] = serialized(String(currentFrame.ax, 3));
+    data["ay"] = serialized(String(currentFrame.ay, 3));
+    data["az"] = serialized(String(currentFrame.az, 3));
     data["alcohol_rise"] = currentFrame.alcohol_rising_anomaly;
     data["rider_upright"] = currentFrame.rider_upright;
     data["batt_pct"] = currentFrame.battery_pct;
@@ -484,12 +491,22 @@ void postCloudEmergencyEvent(const char* eventType, const char* desc) {
 void pollSensors() {
     uint32_t now = millis();
 
-    bool rawWorn = (digitalRead(PIN_HELMET_IR) == LOW);
-    if (simulationMode) rawWorn = true;
+    // FC-51 digital out: factory boards are usually Active-LOW when object near.
+    // Also accept Active-HIGH modules via NVS flag ir_active_high.
+    static int8_t irActiveHigh = -1;
+    if (irActiveHigh < 0) {
+        prefs.begin("helmet_cfg", true);
+        irActiveHigh = prefs.getBool("ir_active_high", false) ? 1 : 0;
+        prefs.end();
+    }
+    int irLevel = digitalRead(PIN_HELMET_IR);
+    bool rawNear = irActiveHigh ? (irLevel == HIGH) : (irLevel == LOW);
+    if (simulationMode) rawNear = true;
 
-    if (rawWorn) {
+    if (rawNear) {
         if (irWornStartMs == 0) irWornStartMs = now;
         currentFrame.worn_duration_ms = now - irWornStartMs;
+        // Instant near-flag for app diagnostics; unlock still needs 1s stable
         currentFrame.helmet_worn = (currentFrame.worn_duration_ms >= 1000);
     } else {
         irWornStartMs = 0;
@@ -657,6 +674,12 @@ void handleSerialCommands() {
         alcohol.update(400, millis(), true);
     } else if (cmd == "PROV" || cmd == "BLE") {
         enterBleProvisioning();
+    } else if (cmd == "IRINV") {
+        prefs.begin("helmet_cfg", false);
+        bool cur = prefs.getBool("ir_active_high", false);
+        prefs.putBool("ir_active_high", !cur);
+        prefs.end();
+        Serial.printf("[IR] Active-HIGH polarity now %s — reboot or wait next poll\n", !cur ? "ON" : "OFF");
     } else if (cmd == "STATUS") {
         Serial.printf("[STATUS] Worn:%d BAC:%.3f Batt:%d%% Ign:%s WiFi:%d WS:%d BLE:%d\n",
                       currentFrame.helmet_worn, currentFrame.bac_level, currentFrame.battery_pct,
