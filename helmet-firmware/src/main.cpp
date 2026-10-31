@@ -170,21 +170,24 @@ void updateConnectionLeds() {
 
         case NetLedMode::SAFETY:
         default:
-            if (now - lastBlinkMs >= 500) {
+            // Connection-first LED language (both boards):
+            //   GREEN solid     = helmet ↔ ignition linked
+            //   GREEN + YELLOW  = peer linked AND cloud/backend OK
+            //   YELLOW blink    = warming / not worn
+            //   RED             = alcohol fail / no peer / fault
+            if (now - lastBlinkMs >= 400) {
                 lastBlinkMs = now;
-                if (lastIgnitionState == IgnitionState::UNLOCKED ||
-                    lastIgnitionState == IgnitionState::RUNNING_LATCHED) {
-                    setLeds(true, false, false);
-                } else if (alcohol.is_warming_up()) {
-                    setLeds(false, true, false);
+                if (!currentFrame.local_link_connected) {
+                    setLeds(false, false, true);
                 } else if (alcohol.is_over_threshold()) {
                     setLeds(false, false, true);
-                } else if (!currentFrame.helmet_worn) {
-                    setLeds(false, true, false);
-                } else if (!currentFrame.local_link_connected) {
-                    setLeds(false, false, true);
+                } else if (alcohol.is_warming_up()) {
+                    ledPhase = !ledPhase;
+                    setLeds(false, ledPhase, false);
+                } else if (currentFrame.internet_ok) {
+                    setLeds(true, true, false);   // peer + backend
                 } else {
-                    setLeds(false, false, true);
+                    setLeds(true, false, false);  // peer only (SoftAP OK)
                 }
             }
             break;

@@ -121,13 +121,22 @@ void updateActuators() {
 
         case NetLedMode::SAFETY:
         default:
-            if (safety.get_state() == IgnitionState::UNLOCKED ||
-                safety.get_state() == IgnitionState::RUNNING_LATCHED) {
+            // GREEN = helmet connected (peer SoftAP / WS heartbeat).
+            // RED only when NO helmet link (or FAULT). Locked-but-linked stays GREEN.
+            if (safety.get_state() == IgnitionState::FAULT) {
+                digitalWrite(PIN_LED_GREEN, LOW);
+                digitalWrite(PIN_LED_RED, HIGH);
+            } else if (helmetClientLinked) {
                 digitalWrite(PIN_LED_GREEN, HIGH);
                 digitalWrite(PIN_LED_RED, LOW);
             } else {
-                digitalWrite(PIN_LED_GREEN, LOW);
-                digitalWrite(PIN_LED_RED, HIGH);
+                period = LINK_LED_BLINK_FAST_MS;
+                if (now - lastLedMs >= period) {
+                    lastLedMs = now;
+                    ledPhase = !ledPhase;
+                    digitalWrite(PIN_LED_GREEN, LOW);
+                    digitalWrite(PIN_LED_RED, ledPhase ? HIGH : LOW);
+                }
             }
             break;
     }
@@ -154,17 +163,11 @@ void refreshNetLedMode() {
         netLedMode = NetLedMode::WIFI_TRY;
         return;
     }
-    if (softApActive && !helmetClientLinked) {
-        netLedMode = NetLedMode::SOFTAP_WAIT;
+    if (!helmetClientLinked) {
+        netLedMode = softApActive ? NetLedMode::SOFTAP_WAIT : NetLedMode::SAFETY;
         return;
     }
-    if (!helmetClientLinked &&
-        (safety.get_lock_reason() == LockReason::NO_LINK ||
-         safety.get_state() == IgnitionState::LOCKED)) {
-        // Linked WiFi but no helmet yet — keep safety red (locked)
-        netLedMode = NetLedMode::SAFETY;
-        return;
-    }
+    // Helmet heartbeat alive — solid green via SAFETY branch
     netLedMode = NetLedMode::SAFETY;
 }
 
@@ -543,6 +546,10 @@ void handleHttpStatus() {
     doc["shared_wifi"] = (WiFi.status() == WL_CONNECTED);
     doc["prefer_softap"] = preferSoftAp;
     doc["live_local"] = true;
+    doc["helmet_connected"] = helmetClientLinked;
+    doc["ignition_connected"] = true;
+    doc["both_linked"] = helmetClientLinked;
+    doc["local_link_connected"] = helmetClientLinked;
     doc["hb_age_ms"] = lastHelmetHbMs == 0 ? -1 : (int)(millis() - lastHelmetHbMs);
     doc["timestamp"] = (uint32_t)(millis() / 1000);
 
