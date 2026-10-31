@@ -64,6 +64,20 @@ struct HelmetTelemetryFrame {
     bool impact_flag = false;
     float impact_g = 1.0f;
     float tilt_deg = 0.0f;
+    float roll_deg = 0.0f;
+    float pitch_deg = 0.0f;
+    float ax = 0, ay = 0, az = 1;
+    float gx = 0, gy = 0, gz = 0;
+    bool imu_anomaly = false;
+    bool tilt_warning = false;
+    bool rider_upright = true;
+    const char* imu_state = "IDLE";
+
+    // Alcohol diagnostics
+    float alcohol_warmup_pct = 0.0f;
+    float bac_rise_rate = 0.0f;
+    bool alcohol_rising_anomaly = false;
+    bool alcohol_calibrated = false;
     
     // GPS
     bool gps_fixed = false;
@@ -82,5 +96,8 @@ struct HelmetTelemetryFrame {
     bool wifi_connected = false;
     bool gprs_connected = false;
     bool local_link_connected = false;
+    bool internet_ok = false;
+    bool prefer_softap = true;          // peer SoftAP after pairing (no phone Wi‑Fi required)
+    const char* wifi_mode = "NONE";     // STA | SOFTAP | NONE
     int8_t rssi = -99;
 };

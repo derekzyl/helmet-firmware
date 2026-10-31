@@ -46,6 +46,7 @@ int ignitionPort = LOCAL_SERVER_PORT;
 String cloudHost = CLOUD_BACKEND_HOST;
 int cloudPort = CLOUD_BACKEND_PORT;
 bool autoConnect = true;
+bool preferSoftAp = true;  // after pairing: helmet↔ignition SoftAP without phone Wi‑Fi
 
 String emergencyContact1 = "+2348000000001";
 String emergencyContact2 = "+2348000000002";
@@ -325,10 +326,15 @@ void sendLocalHeartbeat() {
     data["mq3_warm"] = currentFrame.mq3_warmed_up;
     data["impact"] = currentFrame.impact_flag;
     data["tilt_deg"] = serialized(String(currentFrame.tilt_deg, 1));
+    data["tilt_warn"] = currentFrame.tilt_warning;
+    data["imu_anomaly"] = currentFrame.imu_anomaly;
+    data["alcohol_rise"] = currentFrame.alcohol_rising_anomaly;
+    data["rider_upright"] = currentFrame.rider_upright;
     data["batt_pct"] = currentFrame.battery_pct;
     data["batt_mv"] = currentFrame.battery_mv;
     data["gps_fix"] = currentFrame.gps_fixed;
     data["speed"] = serialized(String(currentFrame.speed_kmh, 1));
+    data["wifi_mode"] = currentFrame.wifi_mode;
 
     String dataString;
     serializeJson(data, dataString);
@@ -393,11 +399,16 @@ void postCloudTelemetry() {
         http.POST(queuedPayload);
     }
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     doc["device_id"] = deviceId;
     doc["helmet_worn"] = currentFrame.helmet_worn;
     doc["bac_level"] = currentFrame.bac_level;
     doc["alcohol_detected"] = alcohol.is_over_threshold();
+    doc["alcohol_warmup_pct"] = currentFrame.alcohol_warmup_pct;
+    doc["alcohol_calibrated"] = currentFrame.alcohol_calibrated;
+    doc["bac_rise_rate"] = currentFrame.bac_rise_rate;
+    doc["alcohol_rising_anomaly"] = currentFrame.alcohol_rising_anomaly;
+    doc["mq3_raw"] = currentFrame.mq3_raw;
     doc["latitude"] = currentFrame.latitude;
     doc["longitude"] = currentFrame.longitude;
     doc["speed_kmh"] = currentFrame.speed_kmh;
@@ -405,14 +416,37 @@ void postCloudTelemetry() {
     doc["battery_voltage"] = currentFrame.battery_mv / 1000.0f;
     doc["impact_g"] = currentFrame.impact_g;
     doc["tilt_degrees"] = currentFrame.tilt_deg;
+    doc["roll_degrees"] = currentFrame.roll_deg;
+    doc["pitch_degrees"] = currentFrame.pitch_deg;
+    doc["ax"] = currentFrame.ax;
+    doc["ay"] = currentFrame.ay;
+    doc["az"] = currentFrame.az;
+    doc["gx"] = currentFrame.gx;
+    doc["gy"] = currentFrame.gy;
+    doc["gz"] = currentFrame.gz;
+    doc["imu_state"] = currentFrame.imu_state;
+    doc["imu_anomaly"] = currentFrame.imu_anomaly;
+    doc["tilt_warning"] = currentFrame.tilt_warning;
+    doc["rider_upright"] = currentFrame.rider_upright;
     doc["ignition_status"] = ignition_state_to_str(lastIgnitionState);
     doc["lock_reason"] = lock_reason_to_str(lastLockReason);
+    doc["local_link_connected"] = currentFrame.local_link_connected;
+    doc["wifi_mode"] = currentFrame.wifi_mode;
+    doc["wifi_ssid"] = WiFi.SSID();
+    doc["internet_ok"] = currentFrame.internet_ok;
+    doc["shared_wifi"] = (strcmp(currentFrame.wifi_mode, "STA") == 0);
+    doc["prefer_softap"] = preferSoftAp;
+    doc["rssi"] = WiFi.RSSI();
+    doc["link_state"] = currentFrame.local_link_connected ? "CONNECTED" : "NO_LINK";
 
     String payload;
     serializeJson(doc, payload);
 
-    if (http.POST(payload) <= 0) {
+    int code = http.POST(payload);
+    currentFrame.internet_ok = (code > 0 && code < 500);
+    if (code <= 0) {
         enqueueOfflineTelemetry(payload);
+        currentFrame.internet_ok = false;
     }
     http.end();
 }
@@ -496,7 +530,23 @@ void pollSensors() {
     collision.update(ax, ay, az, gx, gy, gz, now);
     currentFrame.impact_g = collision.get_peak_impact_g();
     currentFrame.tilt_deg = collision.get_tilt_deg();
+    currentFrame.roll_deg = collision.get_roll_deg();
+    currentFrame.pitch_deg = collision.get_pitch_deg();
+    currentFrame.ax = collision.get_ax();
+    currentFrame.ay = collision.get_ay();
+    currentFrame.az = collision.get_az();
+    currentFrame.gx = collision.get_gx();
+    currentFrame.gy = collision.get_gy();
+    currentFrame.gz = collision.get_gz();
+    currentFrame.imu_anomaly = collision.is_anomaly();
+    currentFrame.tilt_warning = collision.is_tilt_warning();
+    currentFrame.rider_upright = collision.is_rider_upright();
+    currentFrame.imu_state = collision.state_str();
     currentFrame.impact_flag = collision.is_confirmed_crash();
+    currentFrame.alcohol_warmup_pct = alcohol.warmup_progress_pct(now);
+    currentFrame.bac_rise_rate = alcohol.get_bac_rise_rate();
+    currentFrame.alcohol_rising_anomaly = alcohol.is_rising_anomaly();
+    currentFrame.alcohol_calibrated = alcohol.is_calibrated();
 
     if (collision.is_pre_alert()) {
         if ((now / 250) % 2 == 0) digitalWrite(PIN_BUZZER, HIGH);
@@ -671,6 +721,43 @@ void resolveIgnitionHost() {
     }
 }
 
+bool isSoftApOnlySsid(const String& ssid) {
+    return ssid.length() == 0 || ssid == SOFTAP_ONLY_SSID || preferSoftAp;
+}
+
+bool connectSoftApPeer() {
+    // Prefer last SoftAP name, then scan SH-IGN-*
+    prefs.begin("helmet_cfg", true);
+    String lastSoft = prefs.getString("last_softap", "");
+    prefs.end();
+
+    if (lastSoft.length() > 0) {
+        if (tryConnectSsid(lastSoft.c_str(), DEFAULT_SOFTAP_PASS, 8000)) {
+            currentFrame.wifi_connected = true;
+            currentFrame.wifi_mode = "SOFTAP";
+            ignitionHost = "192.168.4.1";
+            startWebSocketClient();
+            Serial.printf("[WIFI] SoftAP peer (cached): %s\n", lastSoft.c_str());
+            return true;
+        }
+    }
+
+    String softAp = scanIgnitionSoftAp();
+    if (softAp.length() > 0 &&
+        tryConnectSsid(softAp.c_str(), DEFAULT_SOFTAP_PASS, WIFI_STA_TIMEOUT_MS)) {
+        currentFrame.wifi_connected = true;
+        currentFrame.wifi_mode = "SOFTAP";
+        ignitionHost = "192.168.4.1";
+        prefs.begin("helmet_cfg", false);
+        prefs.putString("last_softap", softAp);
+        prefs.end();
+        startWebSocketClient();
+        Serial.printf("[WIFI] SoftAP peer linked: %s (no phone Wi‑Fi needed)\n", softAp.c_str());
+        return true;
+    }
+    return false;
+}
+
 void connectWiFi() {
     if (!autoConnect) {
         Serial.println("[WIFI] Auto-connect off — opening BLE for app setup");
@@ -679,46 +766,37 @@ void connectWiFi() {
     }
 
     lastWifiAttemptMs = millis();
+    currentFrame.prefer_softap = preferSoftAp;
 
+    // DEFAULT after pairing: SoftAP peer first so ignition works without phone/internet
+    if (isSoftApOnlySsid(wifiSsid)) {
+        Serial.println("[WIFI] SoftAP-prefer peer mode (helmet ↔ ignition direct)");
+        if (connectSoftApPeer()) return;
+        Serial.println("[WIFI] SoftAP peer not found — will retry");
+        currentFrame.wifi_connected = false;
+        currentFrame.wifi_mode = "NONE";
+        netLedMode = NetLedMode::LINK_FAIL;
+        return;
+    }
+
+    // Optional shared infrastructure Wi‑Fi (app monitoring / cloud)
     if (tryConnectSsid(wifiSsid.c_str(), wifiPass.c_str(), WIFI_STA_TIMEOUT_MS)) {
-        Serial.printf("[WIFI] Connected! IP: %s SSID: %s\n",
+        Serial.printf("[WIFI] STA Connected! IP: %s SSID: %s\n",
                       WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
         currentFrame.wifi_connected = true;
+        currentFrame.wifi_mode = "STA";
         MDNS.begin("smarthelmet-helmet");
         resolveIgnitionHost();
         startWebSocketClient();
         return;
     }
 
-    String softAp = scanIgnitionSoftAp();
-    if (softAp.length() > 0) {
-        if (tryConnectSsid(softAp.c_str(), DEFAULT_SOFTAP_PASS, WIFI_STA_TIMEOUT_MS)) {
-            Serial.printf("[WIFI] SoftAP linked: %s\n", softAp.c_str());
-            currentFrame.wifi_connected = true;
-            ignitionHost = "192.168.4.1";
-            prefs.begin("helmet_cfg", false);
-            prefs.putString("last_softap", softAp);
-            prefs.end();
-            startWebSocketClient();
-            return;
-        }
-    }
-
-    // Try last remembered SoftAP name
-    prefs.begin("helmet_cfg", true);
-    String lastSoft = prefs.getString("last_softap", "");
-    prefs.end();
-    if (lastSoft.length() > 0 && lastSoft != softAp) {
-        if (tryConnectSsid(lastSoft.c_str(), DEFAULT_SOFTAP_PASS, 8000)) {
-            currentFrame.wifi_connected = true;
-            ignitionHost = "192.168.4.1";
-            startWebSocketClient();
-            return;
-        }
-    }
+    // Fallback to SoftAP peer if shared Wi‑Fi missing
+    if (connectSoftApPeer()) return;
 
     Serial.println("[WIFI] No network — will retry / open BLE if link stays down");
     currentFrame.wifi_connected = false;
+    currentFrame.wifi_mode = "NONE";
     netLedMode = NetLedMode::LINK_FAIL;
 }
 
@@ -790,9 +868,11 @@ void setup() {
     deviceId = prefs.getString("dev_id", DEFAULT_DEVICE_ID);
     pairedIgnitionId = prefs.getString("pair_id", DEFAULT_PAIRED_IGNITION_ID);
     pairingPsk = prefs.getString("psk", DEFAULT_PAIRING_PSK);
-    wifiSsid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
-    wifiPass = prefs.getString("pass", DEFAULT_WIFI_PASS);
+    wifiSsid = prefs.getString("ssid", SOFTAP_ONLY_SSID);
+    wifiPass = prefs.getString("pass", DEFAULT_SOFTAP_PASS);
     autoConnect = prefs.getBool("auto_connect", true);
+    preferSoftAp = prefs.getBool("prefer_softap", true);
+    if (wifiSsid == SOFTAP_ONLY_SSID || wifiSsid.length() == 0) preferSoftAp = true;
     prefs.end();
 
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);

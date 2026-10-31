@@ -32,6 +32,7 @@ String wifiSsid = DEFAULT_WIFI_SSID;
 String wifiPass = DEFAULT_WIFI_PASS;
 String softApSsid = "";
 bool autoConnect = true;
+bool preferSoftAp = true;  // SoftAP peer mode — no phone Wi‑Fi required after pairing
 bool provisioned = true;  // factory defaults enable out-of-box auto-connect
 
 float v12BatteryVolts = 12.6f;
@@ -499,22 +500,29 @@ void startSoftAp() {
     prefs.end();
 }
 
+bool isSoftApOnlySsid(const String& ssid) {
+    return ssid.length() == 0 || ssid == SOFTAP_ONLY_SSID || preferSoftAp;
+}
+
 void setupNetworking() {
-    if (!autoConnect) {
-        Serial.println("[WIFI] Auto-connect disabled — starting SoftAP + BLE");
+    if (!autoConnect || isSoftApOnlySsid(wifiSsid)) {
+        Serial.println("[WIFI] SoftAP peer mode — helmet connects directly (no phone Wi‑Fi)");
         startSoftAp();
-        enterBleProvisioning(true);
+        if (!autoConnect) {
+            enterBleProvisioning(true);
+        }
         if (MDNS.begin("smarthelmet-ignition")) {
             MDNS.addService("http", "tcp", LOCAL_SERVER_PORT);
         }
         wsServer.begin();
         wsServer.onEvent(onWebSocketServerEvent);
+        Serial.printf("[WS-SRV] Listening on SoftAP port %d\n", LOCAL_SERVER_PORT);
         return;
     }
 
     netLedMode = NetLedMode::WIFI_TRY;
     WiFi.mode(WIFI_STA);
-    Serial.printf("[WIFI] Auto-connecting to SSID: %s...\n", wifiSsid.c_str());
+    Serial.printf("[WIFI] Auto-connecting to shared SSID: %s...\n", wifiSsid.c_str());
     wifiConnectStartedMs = millis();
     WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
@@ -531,7 +539,7 @@ void setupNetworking() {
         softApActive = false;
         softApSsid = "";
     } else {
-        Serial.println("\n[WIFI] STA timeout — SoftAP fallback");
+        Serial.println("\n[WIFI] STA timeout — SoftAP peer fallback");
         startSoftAp();
     }
 
@@ -592,11 +600,13 @@ void setup() {
     deviceId = prefs.getString("dev_id", DEFAULT_DEVICE_ID);
     pairedHelmetId = prefs.getString("pair_id", DEFAULT_PAIRED_HELMET_ID);
     pairingPsk = prefs.getString("psk", DEFAULT_PAIRING_PSK);
-    wifiSsid = prefs.getString("ssid", DEFAULT_WIFI_SSID);
-    wifiPass = prefs.getString("pass", DEFAULT_WIFI_PASS);
+    wifiSsid = prefs.getString("ssid", SOFTAP_ONLY_SSID);
+    wifiPass = prefs.getString("pass", DEFAULT_SOFTAP_PASS);
     softApSsid = prefs.getString("softap_ssid", "");
     autoConnect = prefs.getBool("auto_connect", true);
+    preferSoftAp = prefs.getBool("prefer_softap", true);
     provisioned = prefs.getBool("provisioned", true);
+    if (wifiSsid == SOFTAP_ONLY_SSID || wifiSsid.length() == 0) preferSoftAp = true;
     prefs.end();
 
     initLcd();

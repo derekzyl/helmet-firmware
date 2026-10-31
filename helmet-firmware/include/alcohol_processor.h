@@ -33,8 +33,12 @@ public:
           baseline_calibrated_(false),
           filtered_adc_(0.0f),
           current_bac_(0.0f),
+          prev_bac_(0.0f),
+          bac_rise_rate_(0.0f),
+          last_update_ms_(0),
           blow_start_ms_(0),
-          blow_stable_(false) {}
+          blow_stable_(false),
+          rising_anomaly_(false) {}
 
     void start_warmup(uint32_t now_ms) {
         warmup_start_ms_ = now_ms;
@@ -84,6 +88,17 @@ public:
             current_bac_ = std::max(0.0f, std::min(0.50f, bac_est));
         }
 
+        // 4b. Rising-rate anomaly (sudden alcohol spike during ride)
+        if (last_update_ms_ > 0 && now_ms > last_update_ms_) {
+            float dt_s = (now_ms - last_update_ms_) / 1000.0f;
+            if (dt_s > 0.05f) {
+                bac_rise_rate_ = (current_bac_ - prev_bac_) / dt_s;
+                rising_anomaly_ = (bac_rise_rate_ > 0.04f) && (current_bac_ > 0.02f);
+            }
+        }
+        prev_bac_ = current_bac_;
+        last_update_ms_ = now_ms;
+
         // 5. Blow sample verification
         if (helmet_worn && filtered_adc_ > 250.0f) {
             if (blow_start_ms_ == 0) {
@@ -128,7 +143,10 @@ public:
     float get_bac() const { return current_bac_; }
     float get_filtered_adc() const { return filtered_adc_; }
     float get_baseline_r0() const { return baseline_r0_; }
+    float get_bac_rise_rate() const { return bac_rise_rate_; }
     bool is_sample_valid() const { return blow_stable_; }
+    bool is_calibrated() const { return baseline_calibrated_; }
+    bool is_rising_anomaly() const { return rising_anomaly_; }
 
     bool is_over_threshold() const {
         return is_warmed_up_ && (current_bac_ >= config_.bac_threshold);
@@ -147,6 +165,10 @@ private:
     bool baseline_calibrated_;
     float filtered_adc_;
     float current_bac_;
+    float prev_bac_;
+    float bac_rise_rate_;
+    uint32_t last_update_ms_;
     uint32_t blow_start_ms_;
     bool blow_stable_;
+    bool rising_anomaly_;
 };

@@ -20,6 +20,7 @@
 #define DEFAULT_WIFI_PASS           "helmet1234"
 #define DEFAULT_SOFTAP_PASS         "helmet1234"
 #define DEFAULT_SOFTAP_PREFIX       "SH-IGN-"
+#define SOFTAP_ONLY_SSID            "__SOFTAP__"   // NVS sentinel: SoftAP-first peer mode
 
 // BLE Provisioning (PROTOCOL.md §5)
 #define BLE_ADV_NAME                "SH-IGN-PROV"

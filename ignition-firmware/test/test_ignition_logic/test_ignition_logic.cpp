@@ -44,15 +44,9 @@ void test_preride_conditions_evaluation(void) {
     TEST_ASSERT_EQUAL(static_cast<int>(IgnitionState::LOCKED), static_cast<int>(fsm.get_state()));
     TEST_ASSERT_EQUAL(static_cast<int>(LockReason::ALCOHOL_DETECTED), static_cast<int>(fsm.get_lock_reason()));
 
-    // 4. Sober (BAC 0.00), but battery critical (10%)
+    // 4. Sober — battery % is ignored; remaining gates unlock
     hb.bac = 0.00f;
     hb.batt_pct = 10;
-    fsm.update(hb, now, 12.6f);
-    TEST_ASSERT_EQUAL(static_cast<int>(IgnitionState::LOCKED), static_cast<int>(fsm.get_state()));
-    TEST_ASSERT_EQUAL(static_cast<int>(LockReason::LOW_BATTERY), static_cast<int>(fsm.get_lock_reason()));
-
-    // 5. ALL 5 PRE-RIDE CONDITIONS SATISFIED -> UNLOCKED!
-    hb.batt_pct = 85;
     fsm.update(hb, now, 12.6f);
     TEST_ASSERT_EQUAL(static_cast<int>(IgnitionState::UNLOCKED), static_cast<int>(fsm.get_state()));
     TEST_ASSERT_EQUAL(static_cast<int>(LockReason::NONE), static_cast<int>(fsm.get_lock_reason()));

@@ -65,7 +65,7 @@ struct SafetyConfig {
     float alcohol_threshold = 0.05f;    // 0.05% BAC limit
     uint32_t link_timeout_ms = 2000;    // 2000 ms link loss threshold
     uint32_t min_worn_ms = 1000;        // 1000 ms stable IR detection required
-    uint8_t min_battery_pct = 15;       // 15% minimum helmet battery
+    uint8_t min_battery_pct = 0;        // battery not gated (0 = ignore %)
     uint32_t latch_duration_ms = 5000;  // 5 seconds unlocked before latching to RUNNING
 };
 

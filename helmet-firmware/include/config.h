@@ -22,9 +22,11 @@
 #define DEFAULT_WIFI_PASS           "helmet1234"
 #define DEFAULT_SOFTAP_PASS         "helmet1234"
 #define DEFAULT_SOFTAP_PREFIX       "SH-IGN-"
+#define SOFTAP_ONLY_SSID            "__SOFTAP__"   // NVS sentinel: skip STA, peer SoftAP only
 #define WIFI_STA_TIMEOUT_MS         12000
 #define WIFI_RECONNECT_INTERVAL_MS  8000
 #define AUTO_BLE_AFTER_NO_LINK_MS   25000
+#define INTERNET_PROBE_INTERVAL_MS  20000
 
 // Cloud Telemetry Timings
 #define CLOUD_TELEMETRY_INTERVAL_MS 3000    // 3 seconds cloud update interval

@@ -166,6 +166,9 @@ inline bool applyToNvs(Preferences& prefs, const char* ns,
     if (ok) {
         prefs.putBool("provisioned", true);
         prefs.putBool("auto_connect", true);
+        // Empty / SoftAP sentinel → peer SoftAP mode (no phone Wi‑Fi required)
+        bool softOnly = (wifiSsid.length() == 0 || wifiSsid == SOFTAP_ONLY_SSID);
+        prefs.putBool("prefer_softap", softOnly);
     }
     prefs.end();
 
