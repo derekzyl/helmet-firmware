@@ -340,6 +340,8 @@ void sendLocalHeartbeat() {
     data["batt_pct"] = currentFrame.battery_pct;
     data["batt_mv"] = currentFrame.battery_mv;
     data["gps_fix"] = currentFrame.gps_fixed;
+    data["lat"] = serialized(String(currentFrame.latitude, 6));
+    data["lon"] = serialized(String(currentFrame.longitude, 6));
     data["speed"] = serialized(String(currentFrame.speed_kmh, 1));
     data["wifi_mode"] = currentFrame.wifi_mode;
 

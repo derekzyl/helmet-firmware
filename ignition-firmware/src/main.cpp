@@ -350,6 +350,9 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
                 latestHeartbeat.ax = data["ax"] | 0.0f;
                 latestHeartbeat.ay = data["ay"] | 0.0f;
                 latestHeartbeat.az = data["az"] | 1.0f;
+                latestHeartbeat.gps_fix = data["gps_fix"] | false;
+                latestHeartbeat.latitude = data["lat"] | 0.0;
+                latestHeartbeat.longitude = data["lon"] | 0.0;
                 {
                     const char* imu = data["imu_state"] | "IDLE";
                     strncpy(latestHeartbeat.imu_state, imu, sizeof(latestHeartbeat.imu_state) - 1);
@@ -527,8 +530,9 @@ void handleHttpStatus() {
     doc["imu_state"] = latestHeartbeat.imu_state;
     doc["imu_anomaly"] = latestHeartbeat.impact;
     doc["speed_kmh"] = latestHeartbeat.speed_kmh;
-    doc["latitude"] = 0;
-    doc["longitude"] = 0;
+    doc["gps_fixed"] = latestHeartbeat.gps_fix;
+    doc["latitude"] = latestHeartbeat.latitude;
+    doc["longitude"] = latestHeartbeat.longitude;
     doc["ignition_status"] = ignition_state_to_str(safety.get_state());
     doc["ignition_state"] = ignition_state_to_str(safety.get_state());
     doc["lock_reason"] = lock_reason_to_str(safety.get_lock_reason());
@@ -580,6 +584,9 @@ void forwardHelmetTelemetryToCloud() {
     doc["az"] = latestHeartbeat.az;
     doc["imu_state"] = latestHeartbeat.imu_state;
     doc["speed_kmh"] = latestHeartbeat.speed_kmh;
+    doc["gps_fixed"] = latestHeartbeat.gps_fix;
+    doc["latitude"] = latestHeartbeat.latitude;
+    doc["longitude"] = latestHeartbeat.longitude;
     doc["ignition_status"] = ignition_state_to_str(safety.get_state());
     doc["lock_reason"] = lock_reason_to_str(safety.get_lock_reason());
     doc["local_link_connected"] = helmetClientLinked;

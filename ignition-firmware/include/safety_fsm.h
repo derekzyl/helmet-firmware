@@ -69,6 +69,9 @@ struct HeartbeatInput {
     float ay = 0.0f;
     float az = 1.0f;
     char imu_state[16] = "IDLE";
+    bool gps_fix = false;
+    double latitude = 0.0;
+    double longitude = 0.0;
 };
 
 struct SafetyConfig {
