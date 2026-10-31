@@ -34,11 +34,13 @@ inline String pendingPairId;
 
 inline BLEServer* server = nullptr;
 inline BLECharacteristic* statusChar = nullptr;
+inline const char* currentAdvName = nullptr;
 
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer*) override { clientConnected = true; }
     void onDisconnect(BLEServer* s) override {
         clientConnected = false;
+        // Do not re-advertise after SUCCESS — phone must not hammer a dying peripheral.
         if (active && status != SUCCESS) {
             s->startAdvertising();
         }
@@ -62,7 +64,6 @@ class WriteCallbacks : public BLECharacteristicCallbacks {
         } else if (uuid.equalsIgnoreCase(BLE_CHAR_PAIRID_UUID)) {
             pendingPairId = val;
         } else if (uuid.equalsIgnoreCase(BLE_CHAR_STATUS_UUID)) {
-            // App writes 1 to commit credentials
             if (v[0] == 1 || val == "1") {
                 applyRequested = true;
             }
@@ -79,6 +80,11 @@ inline void setStatus(Status s) {
     }
 }
 
+inline void stopAdvertising() {
+    BLEAdvertising* adv = BLEDevice::getAdvertising();
+    if (adv) adv->stop();
+}
+
 inline void start(const char* advName) {
     if (active) return;
     active = true;
@@ -88,8 +94,11 @@ inline void start(const char* advName) {
     pendingPass = "";
     pendingPsk = "";
     pendingPairId = "";
+    currentAdvName = advName;
 
     BLEDevice::init(advName);
+    BLEDevice::setPower(ESP_PWR_LVL_P6);
+
     server = BLEDevice::createServer();
     server->setCallbacks(new ServerCallbacks());
 
@@ -115,19 +124,33 @@ inline void start(const char* advName) {
     statusChar->setValue(&idle, 1);
 
     svc->start();
+
     BLEAdvertising* adv = BLEDevice::getAdvertising();
+    BLEAdvertisementData advData;
+    advData.setName(advName);
+    advData.setCompleteServices(BLEUUID(BLE_SERVICE_UUID));
+    adv->setAdvertisementData(advData);
+
+    BLEAdvertisementData scanData;
+    scanData.setName(advName);
+    adv->setScanResponseData(scanData);
+
     adv->addServiceUUID(BLE_SERVICE_UUID);
     adv->setScanResponse(true);
     adv->setMinPreferred(0x06);
+    adv->setMaxPreferred(0x12);
     BLEDevice::startAdvertising();
-    Serial.printf("[BLE] Advertising as %s\n", advName);
+    Serial.printf("[BLE] Advertising as %s (FE20 in adv+scanRsp)\n", advName);
 }
 
 inline void stop() {
     if (!active) return;
+    stopAdvertising();
+    delay(40);
     BLEDevice::deinit(true);
     server = nullptr;
     statusChar = nullptr;
+    currentAdvName = nullptr;
     active = false;
     clientConnected = false;
     Serial.println("[BLE] Provisioning stopped");
@@ -166,7 +189,6 @@ inline bool applyToNvs(Preferences& prefs, const char* ns,
     if (ok) {
         prefs.putBool("provisioned", true);
         prefs.putBool("auto_connect", true);
-        // Empty / SoftAP sentinel → peer SoftAP mode (no phone Wi‑Fi required)
         bool softOnly = (wifiSsid.length() == 0 || wifiSsid == SOFTAP_ONLY_SSID);
         prefs.putBool("prefer_softap", softOnly);
     }
@@ -174,8 +196,9 @@ inline bool applyToNvs(Preferences& prefs, const char* ns,
 
     if (ok) {
         setStatus(SUCCESS);
-        Serial.println("[BLE] Credentials saved — rebooting to apply");
-        delay(400);
+        stopAdvertising();
+        Serial.println("[BLE] Credentials saved — advertising stopped, rebooting");
+        delay(500);
         return true;
     }
     setStatus(FAILED);

@@ -446,6 +446,16 @@ void enterBleProvisioning(bool keepSoftAp = false) {
         delay(200);
         softApActive = false;
         helmetClientLinked = false;
+    } else {
+        // SoftAP stays for helmet peer, but drop STA uplink during BLE.
+        // AP+STA+BLE coexistence is a common cause of Android GATT status 133.
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("[BLE] Dropping home STA uplink during provision (SoftAP kept)");
+            WiFi.disconnect(false);
+        }
+        WiFi.mode(WIFI_AP);
+        WiFi.setSleep(true);
+        delay(100);
     }
     ble_prov::start(BLE_ADV_NAME);
     netLedMode = NetLedMode::BLE_PROV;
