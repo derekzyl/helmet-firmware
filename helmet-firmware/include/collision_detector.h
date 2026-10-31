@@ -47,6 +47,9 @@ public:
           ax_(0), ay_(0), az_(1),
           gx_(0), gy_(0), gz_(0),
           roll_deg_(0), pitch_deg_(0),
+          base_ax_(0), base_ay_(0), base_az_(1),
+          base_mag_(1.0f),
+          have_baseline_(false),
           anomaly_active_(false),
           tilt_warn_(false) {}
 
@@ -58,11 +61,30 @@ public:
         float jerk = std::abs(a_mag - last_a_mag_);
         last_a_mag_ = a_mag;
 
-        // Tilt from gravity axis (0° = upright)
+        float g_mag = std::sqrt(gx * gx + gy * gy + gz * gz);
+
+        // Learn upright gravity vector once the board is still (mounting-agnostic).
+        if (!have_baseline_ && a_mag > 0.75f && a_mag < 1.35f && g_mag < 25.0f) {
+            base_ax_ = ax;
+            base_ay_ = ay;
+            base_az_ = az;
+            base_mag_ = a_mag;
+            have_baseline_ = true;
+        }
+
+        // Tilt = angle between current accel and upright baseline (0° = as-calibrated).
         float tilt_deg = 0.0f;
         if (a_mag > 0.1f) {
-            float cos_tilt = std::max(-1.0f, std::min(1.0f, az / a_mag));
-            tilt_deg = std::acos(cos_tilt) * 180.0f / 3.14159265f;
+            if (have_baseline_) {
+                float dot = ax * base_ax_ + ay * base_ay_ + az * base_az_;
+                float cos_tilt = dot / (a_mag * base_mag_);
+                cos_tilt = std::max(-1.0f, std::min(1.0f, cos_tilt));
+                tilt_deg = std::acos(cos_tilt) * 180.0f / 3.14159265f;
+            } else {
+                // Fallback until baseline locks: angle from +Z
+                float cos_tilt = std::max(-1.0f, std::min(1.0f, az / a_mag));
+                tilt_deg = std::acos(cos_tilt) * 180.0f / 3.14159265f;
+            }
         }
         last_tilt_deg_ = tilt_deg;
         tilt_warn_ = tilt_deg >= config_.warn_tilt_deg && tilt_deg < config_.tilt_threshold_deg;
@@ -70,8 +92,6 @@ public:
         // Approximate roll / pitch for diagnostics (degrees)
         roll_deg_ = std::atan2(ay, az) * 180.0f / 3.14159265f;
         pitch_deg_ = std::atan2(-ax, std::sqrt(ay * ay + az * az)) * 180.0f / 3.14159265f;
-
-        float g_mag = std::sqrt(gx * gx + gy * gy + gz * gz);
 
         // Riding anomalies: high spin or jerk while not already in crash FSM
         bool anomaly = (g_mag >= config_.anomaly_gyro_dps) || (jerk >= config_.anomaly_jerk_g);
@@ -137,7 +157,11 @@ public:
         stillness_start_ms_ = 0;
         pre_alert_start_ms_ = 0;
         anomaly_active_ = false;
+        have_baseline_ = false;
     }
+
+    void recalibrate_upright() { have_baseline_ = false; }
+    bool has_upright_baseline() const { return have_baseline_; }
 
     State get_state() const { return state_; }
     bool is_idle() const { return state_ == State::IDLE; }
@@ -186,6 +210,8 @@ private:
     float last_a_mag_;
     float ax_, ay_, az_, gx_, gy_, gz_;
     float roll_deg_, pitch_deg_;
+    float base_ax_, base_ay_, base_az_, base_mag_;
+    bool have_baseline_;
     bool anomaly_active_;
     bool tilt_warn_;
 };

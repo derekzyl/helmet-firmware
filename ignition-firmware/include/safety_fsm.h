@@ -68,6 +68,9 @@ struct HeartbeatInput {
     float ax = 0.0f;
     float ay = 0.0f;
     float az = 1.0f;
+    bool imu_anomaly = false;
+    bool tilt_warn = false;
+    bool mpu_ok = false;
     char imu_state[16] = "IDLE";
     bool gps_fix = false;
     double latitude = 0.0;

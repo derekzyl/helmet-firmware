@@ -24,7 +24,7 @@
 
 Preferences prefs;
 WebSocketsClient wsClient;
-MPU6050 mpu;
+MPU6050 mpu(0x68);
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);
 HardwareSerial simSerial(1);
@@ -326,26 +326,31 @@ void sendLocalHeartbeat() {
     data["worn_ms"] = currentFrame.worn_duration_ms;
     data["ir_near"] = (currentFrame.worn_duration_ms > 0);
     data["ir_raw"] = digitalRead(PIN_HELMET_IR);
-    data["bac"] = serialized(String(currentFrame.bac_level, 3));
+    // Native JSON numbers so ignition SoftAP path never drops IMU/GPS to 0
+    data["bac"] = currentFrame.bac_level;
     data["mq3_raw"] = currentFrame.mq3_raw;
     data["mq3_warm"] = currentFrame.mq3_warmed_up;
     data["impact"] = currentFrame.impact_flag;
-    data["impact_g"] = serialized(String(currentFrame.impact_g, 2));
-    data["tilt_deg"] = serialized(String(currentFrame.tilt_deg, 1));
+    data["impact_g"] = currentFrame.impact_g;
+    data["tilt_deg"] = currentFrame.tilt_deg;
     data["tilt_warn"] = currentFrame.tilt_warning;
     data["imu_anomaly"] = currentFrame.imu_anomaly;
     data["imu_state"] = currentFrame.imu_state;
-    data["ax"] = serialized(String(currentFrame.ax, 3));
-    data["ay"] = serialized(String(currentFrame.ay, 3));
-    data["az"] = serialized(String(currentFrame.az, 3));
+    data["ax"] = currentFrame.ax;
+    data["ay"] = currentFrame.ay;
+    data["az"] = currentFrame.az;
+    data["gx"] = currentFrame.gx;
+    data["gy"] = currentFrame.gy;
+    data["gz"] = currentFrame.gz;
+    data["mpu_ok"] = mpuPresent;
     data["alcohol_rise"] = currentFrame.alcohol_rising_anomaly;
     data["rider_upright"] = currentFrame.rider_upright;
     data["batt_pct"] = currentFrame.battery_pct;
     data["batt_mv"] = currentFrame.battery_mv;
     data["gps_fix"] = currentFrame.gps_fixed;
-    data["lat"] = serialized(String(currentFrame.latitude, 6));
-    data["lon"] = serialized(String(currentFrame.longitude, 6));
-    data["speed"] = serialized(String(currentFrame.speed_kmh, 1));
+    data["lat"] = currentFrame.latitude;
+    data["lon"] = currentFrame.longitude;
+    data["speed"] = currentFrame.speed_kmh;
     data["wifi_mode"] = currentFrame.wifi_mode;
 
     String dataString;
@@ -538,6 +543,15 @@ void pollSensors() {
     float ax = 0.0f, ay = 0.0f, az = 1.0f;
     float gx = 0.0f, gy = 0.0f, gz = 0.0f;
 
+    if (!mpuPresent) {
+        static uint32_t lastMpuRetryMs = 0;
+        if (now - lastMpuRetryMs > 5000) {
+            lastMpuRetryMs = now;
+            mpu.initialize();
+            mpuPresent = mpu.testConnection();
+            if (mpuPresent) Serial.println("[MPU-6050] Recovered");
+        }
+    }
     if (mpuPresent) {
         int16_t rawAx, rawAy, rawAz, rawGx, rawGy, rawGz;
         mpu.getMotion6(&rawAx, &rawAy, &rawAz, &rawGx, &rawGy, &rawGz);
@@ -547,9 +561,26 @@ void pollSensors() {
         gx = rawGx / 131.0f;
         gy = rawGy / 131.0f;
         gz = rawGz / 131.0f;
+    } else if (simulationMode) {
+        // Serial "SIM" — synthetic motion so UI pipeline can be verified without MPU
+        ax = 0.15f * sinf(now / 400.0f);
+        ay = 0.12f * cosf(now / 350.0f);
+        az = 0.95f + 0.05f * sinf(now / 500.0f);
+        gx = 40.0f * sinf(now / 300.0f);
+        gy = 25.0f * cosf(now / 280.0f);
+        gz = 10.0f * sinf(now / 450.0f);
     }
 
     collision.update(ax, ay, az, gx, gy, gz, now);
+    {
+        static uint32_t lastImuLogMs = 0;
+        if ((mpuPresent || simulationMode) && now - lastImuLogMs > 2000) {
+            lastImuLogMs = now;
+            Serial.printf("[IMU] ax=%.2f ay=%.2f az=%.2f tilt=%.1f° mpu=%d sim=%d\n",
+                          ax, ay, az, collision.get_tilt_deg(),
+                          mpuPresent ? 1 : 0, simulationMode ? 1 : 0);
+        }
+    }
     currentFrame.impact_g = collision.get_peak_impact_g();
     currentFrame.tilt_deg = collision.get_tilt_deg();
     currentFrame.roll_deg = collision.get_roll_deg();
@@ -904,13 +935,41 @@ void setup() {
     if (wifiSsid == SOFTAP_ONLY_SSID || wifiSsid.length() == 0) preferSoftAp = true;
     prefs.end();
 
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 400000);
-    mpu.initialize();
-    if (mpu.testConnection()) {
-        mpuPresent = true;
-        Serial.println("[MPU-6050] OK");
-    } else {
-        Serial.println("[MPU-6050] Missing — sim fallback");
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+    Wire.setClock(100000);
+    delay(80);
+    Serial.printf("[I2C] Scanning SDA=%d SCL=%d ...\n", PIN_I2C_SDA, PIN_I2C_SCL);
+    uint8_t found = 0;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("[I2C] device @ 0x%02X\n", addr);
+            found++;
+        }
+    }
+    if (found == 0) Serial.println("[I2C] no devices — check MPU wiring / 3V3 / pull-ups");
+
+    auto tryMpu = [](uint8_t addr) -> bool {
+        MPU6050 probe(addr);
+        probe.initialize();
+        delay(40);
+        if (!probe.testConnection()) return false;
+        // Wake + ranges (some clones boot asleep)
+        probe.setSleepEnabled(false);
+        probe.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
+        probe.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
+        mpu = probe;
+        Serial.printf("[MPU-6050] OK @ 0x%02X (100kHz)\n", addr);
+        return true;
+    };
+
+    mpuPresent = tryMpu(0x68) || tryMpu(0x69);
+    if (!mpuPresent) {
+        delay(200);
+        mpuPresent = tryMpu(0x68) || tryMpu(0x69);
+        if (!mpuPresent) {
+            Serial.println("[MPU-6050] Missing — type SIM on serial to fake motion, or rewire AD0/SDA/SCL");
+        }
     }
 
     gpsSerial.begin(9600, SERIAL_8N1, PIN_GPS_RX, PIN_GPS_TX);

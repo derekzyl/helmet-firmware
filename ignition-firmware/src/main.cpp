@@ -10,12 +10,36 @@
 #include <HTTPClient.h>
 #include <esp_task_wdt.h>
 #include <cstring>
+#include <cstdlib>
 
 #include "pins.h"
 #include "config.h"
 #include "crypto_utils.h"
 #include "safety_fsm.h"
 #include "ble_provision.h"
+
+// SoftAP heartbeat may carry numbers or legacy stringified floats
+static float jsonAsFloat(JsonVariantConst v, float fallback = 0.0f) {
+    if (v.isNull()) return fallback;
+    if (v.is<float>() || v.is<double>() || v.is<int>() || v.is<long>()) return v.as<float>();
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        if (!s || !*s) return fallback;
+        return static_cast<float>(atof(s));
+    }
+    return fallback;
+}
+
+static double jsonAsDouble(JsonVariantConst v, double fallback = 0.0) {
+    if (v.isNull()) return fallback;
+    if (v.is<float>() || v.is<double>() || v.is<int>() || v.is<long>()) return v.as<double>();
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        if (!s || !*s) return fallback;
+        return atof(s);
+    }
+    return fallback;
+}
 
 // ==============================================================================
 // GLOBAL SYSTEM INSTANCES & STATE
@@ -340,22 +364,25 @@ void onWebSocketServerEvent(uint8_t num, WStype_t type, uint8_t * payload, size_
             if (strcmp(msgType, "HEARTBEAT") == 0) {
                 latestHeartbeat.worn = data["worn"] | false;
                 latestHeartbeat.worn_ms = data["worn_ms"] | 0;
-                latestHeartbeat.bac = data["bac"] | 0.0f;
+                latestHeartbeat.bac = jsonAsFloat(data["bac"], 0.0f);
                 latestHeartbeat.mq3_warm = data["mq3_warm"] | false;
                 latestHeartbeat.impact = data["impact"] | false;
                 latestHeartbeat.batt_pct = data["batt_pct"] | 100;
-                latestHeartbeat.speed_kmh = data["speed"] | 0.0f;
+                latestHeartbeat.speed_kmh = jsonAsFloat(data["speed"], 0.0f);
                 latestHeartbeat.ir_near = data["ir_near"] | latestHeartbeat.worn;
                 latestHeartbeat.ir_raw = data["ir_raw"] | 1;
                 latestHeartbeat.mq3_raw = data["mq3_raw"] | 0;
-                latestHeartbeat.tilt_deg = data["tilt_deg"] | 0.0f;
-                latestHeartbeat.impact_g = data["impact_g"] | 1.0f;
-                latestHeartbeat.ax = data["ax"] | 0.0f;
-                latestHeartbeat.ay = data["ay"] | 0.0f;
-                latestHeartbeat.az = data["az"] | 1.0f;
+                latestHeartbeat.tilt_deg = jsonAsFloat(data["tilt_deg"], 0.0f);
+                latestHeartbeat.impact_g = jsonAsFloat(data["impact_g"], 1.0f);
+                latestHeartbeat.ax = jsonAsFloat(data["ax"], 0.0f);
+                latestHeartbeat.ay = jsonAsFloat(data["ay"], 0.0f);
+                latestHeartbeat.az = jsonAsFloat(data["az"], 1.0f);
+                latestHeartbeat.imu_anomaly = data["imu_anomaly"] | false;
+                latestHeartbeat.tilt_warn = data["tilt_warn"] | false;
+                latestHeartbeat.mpu_ok = data["mpu_ok"] | false;
                 latestHeartbeat.gps_fix = data["gps_fix"] | false;
-                latestHeartbeat.latitude = data["lat"] | 0.0;
-                latestHeartbeat.longitude = data["lon"] | 0.0;
+                latestHeartbeat.latitude = jsonAsDouble(data["lat"], 0.0);
+                latestHeartbeat.longitude = jsonAsDouble(data["lon"], 0.0);
                 {
                     const char* imu = data["imu_state"] | "IDLE";
                     strncpy(latestHeartbeat.imu_state, imu, sizeof(latestHeartbeat.imu_state) - 1);
@@ -527,11 +554,13 @@ void handleHttpStatus() {
     doc["impact_g"] = latestHeartbeat.impact_g;
     doc["tilt_degrees"] = latestHeartbeat.tilt_deg;
     doc["tilt_deg"] = latestHeartbeat.tilt_deg;
+    doc["tilt_warning"] = latestHeartbeat.tilt_warn;
     doc["ax"] = latestHeartbeat.ax;
     doc["ay"] = latestHeartbeat.ay;
     doc["az"] = latestHeartbeat.az;
     doc["imu_state"] = latestHeartbeat.imu_state;
-    doc["imu_anomaly"] = latestHeartbeat.impact;
+    doc["imu_anomaly"] = latestHeartbeat.imu_anomaly;
+    doc["mpu_ok"] = latestHeartbeat.mpu_ok;
     doc["speed_kmh"] = latestHeartbeat.speed_kmh;
     doc["gps_fixed"] = latestHeartbeat.gps_fix;
     doc["latitude"] = latestHeartbeat.latitude;
@@ -586,10 +615,13 @@ void forwardHelmetTelemetryToCloud() {
     doc["battery_percentage"] = latestHeartbeat.batt_pct;
     doc["impact_g"] = latestHeartbeat.impact_g;
     doc["tilt_degrees"] = latestHeartbeat.tilt_deg;
+    doc["tilt_warning"] = latestHeartbeat.tilt_warn;
     doc["ax"] = latestHeartbeat.ax;
     doc["ay"] = latestHeartbeat.ay;
     doc["az"] = latestHeartbeat.az;
     doc["imu_state"] = latestHeartbeat.imu_state;
+    doc["imu_anomaly"] = latestHeartbeat.imu_anomaly;
+    doc["mpu_ok"] = latestHeartbeat.mpu_ok;
     doc["speed_kmh"] = latestHeartbeat.speed_kmh;
     doc["gps_fixed"] = latestHeartbeat.gps_fix;
     doc["latitude"] = latestHeartbeat.latitude;
@@ -597,9 +629,11 @@ void forwardHelmetTelemetryToCloud() {
     doc["ignition_status"] = ignition_state_to_str(safety.get_state());
     doc["lock_reason"] = lock_reason_to_str(safety.get_lock_reason());
     doc["local_link_connected"] = helmetClientLinked;
-    doc["wifi_mode"] = "STA";
+    doc["wifi_mode"] = softApActive ? "APSTA" : "STA";
+    doc["wifi_ssid"] = wifiSsid;
     doc["internet_ok"] = true;
     doc["shared_wifi"] = true;
+    doc["prefer_softap"] = true;
 
     String body;
     serializeJson(doc, body);
@@ -610,46 +644,34 @@ void forwardHelmetTelemetryToCloud() {
     }
 }
 
-void startSoftAp() {
-    WiFi.mode(WIFI_AP);
+bool isSoftApOnlySsid(const String& ssid) {
+    return ssid.length() == 0 || ssid == SOFTAP_ONLY_SSID;
+}
+
+// SoftAP is ALWAYS on for helmet↔ignition offline peer.
+// Home Wi‑Fi (STA) is optional uplink so the phone can stay on home Wi‑Fi
+// while ignition forwards helmet sensors to the cloud.
+void startSoftAp(bool withStaUplink) {
+    WiFi.mode(withStaUplink ? WIFI_AP_STA : WIFI_AP);
     String mac = WiFi.macAddress();
     mac.replace(":", "");
     softApSsid = String(DEFAULT_SOFTAP_PREFIX) + mac.substring(mac.length() - 4);
     WiFi.softAP(softApSsid.c_str(), DEFAULT_SOFTAP_PASS);
     softApActive = true;
     softApStartedMs = millis();
-    Serial.printf("[WIFI] SoftAP Active: %s | IP: %s | pass: %s\n",
-                  softApSsid.c_str(), WiFi.softAPIP().toString().c_str(), DEFAULT_SOFTAP_PASS);
+    Serial.printf("[WIFI] SoftAP peer Active: %s | IP: %s | pass: %s | APSTA=%d\n",
+                  softApSsid.c_str(), WiFi.softAPIP().toString().c_str(), DEFAULT_SOFTAP_PASS,
+                  withStaUplink ? 1 : 0);
 
     prefs.begin("ignition_cfg", false);
     prefs.putString("softap_ssid", softApSsid);
     prefs.end();
 }
 
-bool isSoftApOnlySsid(const String& ssid) {
-    return ssid.length() == 0 || ssid == SOFTAP_ONLY_SSID || preferSoftAp;
-}
-
-void setupNetworking() {
-    if (!autoConnect || isSoftApOnlySsid(wifiSsid)) {
-        Serial.println("[WIFI] SoftAP peer mode — helmet connects directly (no phone Wi‑Fi)");
-        startSoftAp();
-        if (!autoConnect) {
-            enterBleProvisioning(true);
-        }
-        if (MDNS.begin("smarthelmet-ignition")) {
-            MDNS.addService("http", "tcp", LOCAL_SERVER_PORT);
-        }
-        wsServer.begin();
-        wsServer.onEvent(onWebSocketServerEvent);
-        startHttpStatusServer();
-        Serial.printf("[WS-SRV] Listening on SoftAP port %d\n", LOCAL_SERVER_PORT);
-        return;
-    }
-
+bool connectHomeWifiSta() {
+    if (isSoftApOnlySsid(wifiSsid) || !autoConnect) return false;
     netLedMode = NetLedMode::WIFI_TRY;
-    WiFi.mode(WIFI_STA);
-    Serial.printf("[WIFI] Auto-connecting to shared SSID: %s...\n", wifiSsid.c_str());
+    Serial.printf("[WIFI] Home STA uplink → %s (phone stays on this Wi‑Fi)\n", wifiSsid.c_str());
     wifiConnectStartedMs = millis();
     WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
@@ -660,14 +682,27 @@ void setupNetworking() {
         Serial.print(".");
         esp_task_wdt_reset();
     }
-
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WIFI] STA Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-        softApActive = false;
-        softApSsid = "";
+        Serial.printf("\n[WIFI] STA OK IP: %s — cloud forward enabled\n", WiFi.localIP().toString().c_str());
+        return true;
+    }
+    Serial.println("\n[WIFI] STA timeout — SoftAP peer still works offline");
+    return false;
+}
+
+void setupNetworking() {
+    // Peer SoftAP first (helmet never needs home Wi‑Fi)
+    const bool wantSta = autoConnect && !isSoftApOnlySsid(wifiSsid);
+    startSoftAp(wantSta);
+
+    if (wantSta) {
+        connectHomeWifiSta();
     } else {
-        Serial.println("\n[WIFI] STA timeout — SoftAP peer fallback");
-        startSoftAp();
+        Serial.println("[WIFI] SoftAP-only peer (no home uplink) — sensors stay local until home Wi‑Fi is provisioned");
+    }
+
+    if (!autoConnect) {
+        enterBleProvisioning(true);
     }
 
     if (MDNS.begin("smarthelmet-ignition")) {
@@ -678,7 +713,7 @@ void setupNetworking() {
     wsServer.begin();
     wsServer.onEvent(onWebSocketServerEvent);
     startHttpStatusServer();
-    Serial.printf("[WS-SRV] Listening on port %d\n", LOCAL_SERVER_PORT);
+    Serial.printf("[WS-SRV] Listening SoftAP :%d + HTTP :80\n", LOCAL_SERVER_PORT);
 }
 
 void maintainProvisioning() {
